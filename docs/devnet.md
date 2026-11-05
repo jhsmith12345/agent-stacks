@@ -58,7 +58,7 @@ These are local test tokens. `play` creates a two-hand match and launches two is
 
 ## Public devnet, when funded
 
-The SDK accepts the official devnet genesis hash and rejects other public clusters, including mainnet and testnet. Deployment/status can use a public devnet RPC; the protected agent must use a separately configured operator-controlled validating node. Public funding/deployment and separate-host testing remain outstanding; do not reuse a local policy against public devnet.
+The [two-machine runbook](devnet-two-machines.md) has the full procedure, including what devnet looks like today and how to get test SOL. The SDK accepts the official devnet genesis hash and rejects other public clusters, including mainnet and testnet. Deployment/status can use a public devnet RPC; the protected agent must use a separately configured operator-controlled validating node, except in a test-funds timing run labelled with `--third-party-rpc`. Do not reuse a local policy against public devnet.
 
 ```sh
 unset AGENT_STACKS_RPC AGENT_STACKS_ALLOW_LOCAL AGENT_STACKS_TRUST_POLICY
@@ -68,7 +68,7 @@ npm run devnet:deploy
 
 Before play, create and inspect a policy for your own devnet validating node with devnet genesis and the deployed artifact. Set `AGENT_STACKS_RPC` to that node and `AGENT_STACKS_TRUST_POLICY` to its policy. Allow upgradeable code only for this test deployment. A public endpoint is not a substitute for this trust boundary.
 
-Only run deployment once the project payer has sufficient devnet test SOL. `status` prints its address and balance. Deployment checks program-storage funding and uses explicit project keypair, buffer and upgrade-authority paths; it does not use the default Solana wallet. The project payer would retain upgrade authority. A match additionally needs temporary proof storage funding (about 4.54 SOL reused between shuffles for the default full-verification path, or about 0.0246 SOL for the optional cooperative path), fees and deposits. The separately created `user-wallet-keypair.json` is not automatically the deployment payer.
+Only run deployment once the project payer has sufficient devnet test SOL. `status` prints its address and balance. Deployment checks program-storage funding and uses explicit project keypair, buffer and upgrade-authority paths; it does not use the default Solana wallet. The project payer would retain upgrade authority. A match additionally needs temporary proof storage funding, fees and deposits. Storage is about 4.54 SOL on a default local validator, reused between shuffles, or about 0.0246 SOL for the optional cooperative path. Rent differs by cluster and is changing: the same proof buffer cost 3.32 SOL on devnet on 2026-11-05. `status` prints a budget from the cluster's current rent. The separately created `user-wallet-keypair.json` is not automatically the deployment payer. `deploy` refuses to replace a program that's already deployed, because agents have pinned its bytes; use a new program keypair for a new version.
 
 ## Independent agents and recovery
 
@@ -77,6 +77,8 @@ Create an invitation naming the opponent's public address:
 ```sh
 node scripts/devnet.js create OPPONENT_ADDRESS
 ```
+
+The project payer holds the upgrade authority, so set `AGENT_STACKS_WALLET` to a separate key when the creator will run an agent. The same variable applies to `cancel`, `close` and `timeout`. A manifest leaves out any RPC URL that could hold an API key, and output shows such a URL without its path or query.
 
 The on-chain protocol permits 1–1,000 hands and 30–259,200-second turns. The protected agent's default policy caps matches at two hands/1,000,000 lamports per player and refuses turns below one hour or above 24 hours (`--max-turn-seconds` raises the ceiling); the demo defaults to a 24-hour clock and 20,000-lamport big blind. Environment overrides must also satisfy that policy. Each agent must review the accepted manifest before joining. The agent refuses to join without funding for its deposit, the full-proof fallback and fees, then joins by itself once funded. The clock floor is not a measured public-network liveness guarantee.
 

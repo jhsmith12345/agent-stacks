@@ -184,6 +184,17 @@ test('a security failure still stops the standalone agent instead of being retri
  assert.notEqual(await child.finished,0);assert.match(child.output,/differs from pinned/);
  assert.doesNotMatch(child.output,/retrying in/);
 });
+test('a waiting agent eases off polling and keeps watching the match',{timeout:30000},async t=>{
+ const s=await scenario(t,{buffer:'closed',phase:2});const child=s.standalone();
+ const reads=()=>s.rpc.calls.filter(method=>method==='getAccountInfo').length;
+ await new Promise(done=>setTimeout(done,3000));const before=reads();
+ await new Promise(done=>setTimeout(done,6000));const during=reads()-before;
+ assert.ok(during>0,'it is still watching');
+ // Each look is three reads, so polling every second would be about 18 here.
+ assert.ok(during<=9,`${during} reads in six seconds`);
+ assert.equal(s.rpc.sent.length,0);child.kill('SIGTERM');
+});
+
 test('an agent started before its match finalizes waits, then plays',{timeout:30000},async t=>{
  const s=await scenario(t,{buffer:'closed',phase:5});s.rpc.hideMatch=2;const child=s.standalone();
  await until(()=>/retrying in .*not visible at finalized/.test(child.output));

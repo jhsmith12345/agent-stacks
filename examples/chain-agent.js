@@ -237,13 +237,16 @@ else{
   const short=await fundingShortfall(m,0);
   if(short)process.stderr.write(`Agent ${seat}: warning: balance ${short.balance} is below the ${short.required} lamports a full-proof fallback can need\n`);
  });
+ // Each look at the match re-reads the whole program to check its pin, which is about 250 KB through a
+ // hosted RPC. An opponent's proof upload takes many minutes, so ease off while there's nothing to do.
+ let idle=0;
  for(let complete=false;!complete;){
   complete=await patiently(async()=>{
    await settle();const m=await client.match(accepted.match,accepted);
    if(m.phase===6){await step();respond({kind:'complete',payouts:m.payouts});return true;}
    if(await client.chainTime()>=m.deadline)await client.command(accepted.match,5,[],accepted.players.map(p=>({pubkey:new PublicKey(p),isSigner:false,isWritable:true})),null,m.version);
-   else if(obligated(m)===seat||(m.phase===0&&seat===1))await handle({kind:'step'});
-   else await pause(1000);
+   else if(obligated(m)===seat||(m.phase===0&&seat===1)){idle=0;await handle({kind:'step'});}
+   else{await pause(Math.min(8000,1000*2**idle));idle++;}
    return false;
   });
  }

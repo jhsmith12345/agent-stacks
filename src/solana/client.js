@@ -7,6 +7,11 @@ import { canonical } from '../crypto.js';
 export {PublicKey,Keypair,SystemProgram};
 export const DEVNET='https://api.devnet.solana.com';
 export const DEVNET_GENESIS='EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG';
+const LOOPBACK=['127.0.0.1','localhost','[::1]'];
+// Hosted RPC URLs usually carry an API key in the path or query, so logs and receipts get this form.
+export const redactRpc=url=>{const u=new URL(url);return `${u.protocol}//${u.host}${u.pathname==='/'&&!u.search?'':'/…'}`;};
+// A manifest goes to the other player. Only endpoints with nothing private in them may travel with it.
+export const manifestRpc=url=>{const u=new URL(url);return (url===DEVNET||LOOPBACK.includes(u.hostname))&&u.pathname==='/'&&!u.search?{rpc:url}:{};};
 export const LAYOUT={size:4260,deck:250,deckEnd:3578,blind:3578,game:3586,shares:3675,cursor:4251,hand:4252,maxHands:4256};
 export async function loadWallet(file){const bytes=JSON.parse(readPrivate(file,'utf8'));if(!Array.isArray(bytes)||bytes.length!==64||bytes.some(n=>!Number.isInteger(n)||n<0||n>255))throw Error('Invalid wallet secret encoding');return Keypair.fromSecretKey(Uint8Array.from(bytes));}
 export async function ensureWallet(file){try{return await loadWallet(file);}catch(error){if(error.code!=='ENOENT')throw error;}const key=await Keypair.generate();try{writePrivate(file,JSON.stringify([...key.secretKey]),{exclusive:true});}catch(error){if(error.code!=='EEXIST')throw error;}return loadWallet(file);}

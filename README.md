@@ -38,7 +38,7 @@ npm run solana:build
 npm run solana:test
 ```
 
-See [the Solana program guide](programs/escrow/README.md) for instructions and account formats, [the local integration report](docs/testing.md), and [local/devnet commands](docs/devnet.md). An [optional cooperative shuffle path](docs/optimization.md) measured 42 transactions / 0.00023 SOL in base fees per hand locally, about 97% below full on-chain verification. Both players verify proofs off-chain and co-sign the exact deck; unilateral verification remains available and is still the default.
+See [the Solana program guide](programs/escrow/README.md) for instructions and account formats, [the two-machine devnet runbook](docs/devnet-two-machines.md), [the local integration report](docs/testing.md), and [local/devnet commands](docs/devnet.md). An [optional cooperative shuffle path](docs/optimization.md) measured 42 transactions / 0.00023 SOL in base fees per hand locally, about 97% below full on-chain verification. Both players verify proofs off-chain and co-sign the exact deck; unilateral verification remains available and is still the default.
 
 The chain implementation carries stacks through up to 1,000 agreed hands, alternates the button, and uses fresh hand-bound keys and shuffles. The demo defaults to two hands. Account format v5 is incompatible with earlier layouts. The tests run actual SBF in LiteSVM, with no public RPC, wallet funding, or deployment required.
 

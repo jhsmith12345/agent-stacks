@@ -1,5 +1,59 @@
 # Local Solana integration reports
 
+## Two-machine devnet rehearsal
+
+This rehearsed the [two-machine runbook](devnet-two-machines.md) on 2026-11-05. It ran on one Mac, against a local validator using devnet's feature set (`--clone-feature-set --url https://api.devnet.solana.com`, `--limit-ledger-size 5000000`). Rent and slot time stayed at local defaults. Program bytecode and cryptography are unchanged. Nothing has run on public devnet yet, and this says nothing about separate hosts or real network conditions.
+
+Both agents reached the validator through a proxy acting as one hosted RPC: an API key in the URL, 55 ms of latency, one shared rate limit (100 requests per 10 seconds, 40 per method), 0.5% of requests failed with HTTP 503, and 3% answered from a lagging backend.
+
+| Field | Result |
+| --- | --- |
+| Genesis | `Gt9tLwpxURC59QvAAaLeE6U6pmWhPYP1XAPL2epFJHuE` |
+| Match | `YU5RnmPS2vep3yLmdB4KfppE9ueQ2mYbRWfooEPT8J9` |
+| Path | Full proof, with the agent reading only the chain; the agents shared one manifest and nothing else |
+| Terminal state | 2 hands in 56.6 minutes, both agents exited 0, no pending payouts |
+| Awards | 980,000 / 1,020,000 lamports |
+| Injected faults | `kill -9` of A mid-upload, 120-second network cut on B, `kill -9` of B during reveals |
+| Shuffles | 783, 869, 731 and 729 seconds |
+| Tightest clock | 85,530 of 86,400 seconds left |
+| Transactions and fees | A 1,460 / 7,310,000 lamports; B 1,461 / 7,315,000 lamports |
+| RPC requests | A 17,078, including deploy and preflight; B 14,249 |
+| Refused by the rate limit | A 2,764; B 675 |
+| Peak memory | A 228 MB; B 224 MB |
+| Deploy | 250 seconds through the proxy on the budget `status` printed, with 0.049 SOL left; a second deploy was refused |
+| Receipt | Verified before close; the verifier then refused the closed match |
+| Secrets | The API key appeared in no output and no file other than the policy |
+
+Balances reconcile exactly. A's net cost of 8,286,560 lamports is its 7,310,000 in guarded fees, the 20,000 it lost in play, and 956,560 for two fees outside the guard and the rent left behind on the retired match address. B's net cost of 7,295,000 lamports is its 7,315,000 in fees less the 20,000 it won.
+
+The demo was also rehearsed on the smallest funding that works, each resuming its finished match afterwards with no balance change. These had latency but no rate limit or injected faults:
+
+| Demo | Time | RPC requests | Transactions |
+| --- | --- | --- | --- |
+| Low-cost | 114 seconds | 1,380 | 42 per hand |
+| Full-proof | 1,605 seconds | 22,901 | Not separately counted |
+
+The rehearsals found these faults in the new tooling, each now fixed and covered by a test:
+
+- Preflight asked a match creator for a deposit it had already paid.
+- One HTTP 503 made preflight report a failure, and a node going down left no report at all.
+- web3.js retries HTTP 429 silently, which made preflight report no rate limits on a limited endpoint. That check now uses raw requests.
+- An idle agent re-read about 250 KB of program data every second. It now backs off to 8 seconds.
+- A default local validator kept only about 21 minutes of history, so the verifier lost the start of a 58-minute match and failed with a misleading error. It now names the cause and writes no receipt. The match itself is unaffected.
+
+### Binary format
+
+`SIMD-0500` would stop new deployments of SBPF v0, v1 and v2 programs, and was inactive on devnet and mainnet on 2026-11-05. The pinned artifact is SBPFv0. A scratch SBPFv3 build of the same source passed all 19 Rust tests and deployed under devnet's features. It hasn't been adopted, and the pinned hash is unchanged.
+
+| Measure | SBPFv0 (pinned) | SBPFv3 (scratch) |
+| --- | --- | --- |
+| Binary | 186,584 bytes | 175,520 bytes |
+| SHA-256 | `9232974b753314d5e7dbcde07a29b82596326cd1b2afedd1b12217f1542c376a` | `b366cf27bb2c105389e5a5ecf193d769b2be9024a15e49baf7465bfb255030d4` |
+| Payout | 98,947 CU | 93,404 CU |
+| Joint deck | 31,771 CU | 25,755 CU |
+| Full verification | 39,746,478 CU | 39,733,032 CU |
+| DLEQ check | 16,929 CU | 16,932 CU |
+
 ## Protected-agent v1 follow-up
 
 The [protected-agent implementation](security-hardening.md) was tested against a fresh loopback Agave validator with finalized confirmations and a pinned v5 artifact. This adds no on-chain instructions or changed cryptography. Test-only code/authority policy and explicit node ownership remain assumptions; the malicious configured-node attack is deliberately retained as a limitation test.

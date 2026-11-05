@@ -35,4 +35,11 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: npm run solana:build
+      - name: Record the program hash
+        run: sha256sum target/deploy/agent_stacks_escrow.so
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: agent_stacks_escrow
+          path: target/deploy/agent_stacks_escrow.so
+          if-no-files-found: error
       - run: cargo test --workspace --locked

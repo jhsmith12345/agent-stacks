@@ -2,10 +2,10 @@
 import {readFileSync,writeFileSync,mkdirSync,existsSync} from 'node:fs';
 import {resolve,dirname} from 'node:path';
 import {createHash} from 'node:crypto';
-import {ChainClient,PublicKey} from '../src/solana/client.js';
-import {findSettlement,claimedSeats,handTransitions,deferredSeatsFrom} from '../src/solana/receipts.js';
+import {ChainClient,DEVNET,PublicKey} from '../src/solana/client.js';
+import {findSettlement,claimedSeats,handTransitions,deferredSeatsFrom,hasCreation} from '../src/solana/receipts.js';
 const config=JSON.parse(readFileSync(resolve(process.argv[2]),'utf8'));
-const client=new ChainClient(process.env.AGENT_STACKS_RPC??config.rpc,config.program,null,{allowLocal:process.env.AGENT_STACKS_ALLOW_LOCAL==='1'});
+const client=new ChainClient(process.env.AGENT_STACKS_RPC??config.rpc??DEVNET,config.program,null,{allowLocal:process.env.AGENT_STACKS_ALLOW_LOCAL==='1'});
 const genesis=await client.checkNetwork();if(genesis!==config.genesis)throw Error('Manifest genesis mismatch');
 const m=await client.match(config.match,config);
 if(m.phase!==6||m.game.stage!==3||m.payouts[0]+m.payouts[1]!==config.buyIn*2)throw Error('Match has not completed normal poker settlement');
@@ -15,6 +15,7 @@ const transactions=[];
 for(const item of signatures.filter(s=>!s.err)){
  const tx=await client.connection.getTransaction(item.signature,{commitment:'confirmed',maxSupportedTransactionVersion:0});if(!tx)throw Error(`Missing history for ${item.signature}`);transactions.push({signature:item.signature,tx});
 }
+if(!hasCreation(transactions,config.program,config.match))throw Error(`This node no longer holds this match's full history: it returned ${transactions.length} transactions and not the one creating the match. Use a node that keeps longer history. The match itself is unaffected.`);
 const final=findSettlement(transactions,config.program,config.match);if(!final)throw Error('No successful settlement transaction');
 const claimed=claimedSeats(transactions,config.program,config.match);
 const keys=(final.tx.transaction.message.staticAccountKeys??final.tx.transaction.message.accountKeys).map(k=>k.toBase58());

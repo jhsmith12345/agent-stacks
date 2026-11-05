@@ -14,6 +14,11 @@ export function programInstructions(tx,program){
 export function findSettlement(transactions,program,match){
  return transactions.find(({tx})=>programInstructions(tx,program).some(ix=>[14,15].includes(ix.tag)&&ix.accounts[0]===match))??null;
 }
+// Nodes discard old transaction history. Without the match's creation there is no way to tell what's missing,
+// so a receipt must not be built from what remains.
+export function hasCreation(transactions,program,match){
+ return transactions.some(({tx})=>programInstructions(tx,program).some(ix=>ix.tag===1&&ix.accounts[2]===match));
+}
 // Seats whose award was withheld at settlement and claimed afterwards with tag 20.
 export function claimedSeats(transactions,program,match){
  return new Set(transactions.flatMap(({tx})=>programInstructions(tx,program).filter(ix=>ix.tag===20&&ix.accounts[0]===match).map(ix=>ix.data[9])));

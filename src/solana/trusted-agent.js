@@ -29,6 +29,8 @@ const STRICT_TRANSACTIONS_PER_HAND=710;
 // The most a player can need if the opponent refuses to co-sign. Proof rent is refunded after each
 // shuffle, so one buffer's worth covers every hand.
 export const strictFundingRequired=({rent,buyIn,hands,maxFeePerTransaction})=>buyIn+rent+hands*STRICT_TRANSACTIONS_PER_HAND*maxFeePerTransaction;
+// A full-proof buffer: the fixed proof, its binding context (under 200 bytes) and the account header.
+export const PROOF_ACCOUNT_BYTES=652324+200+84;
 const validBytes=value=>typeof value==='string'&&value.length<=2048&&/^[A-Za-z0-9+/]+={0,2}$/.test(value);
 function endpoint(value,allowLocal){
  const u=new URL(value);const loopback=['127.0.0.1','localhost','[::1]'].includes(u.hostname);

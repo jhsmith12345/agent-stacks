@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {getBase58Decoder} from '@solana/kit';
-import {programInstructions,findSettlement,claimedSeats,handTransitions,deferredSeatsFrom} from '../src/solana/receipts.js';
+import {programInstructions,findSettlement,claimedSeats,handTransitions,deferredSeatsFrom,hasCreation} from '../src/solana/receipts.js';
 
 const PROGRAM='ProgramAAA',MATCH='MatchAAA',A='WalletA',B='WalletB',OTHER='OtherProgram';
 const encode=bytes=>getBase58Decoder().decode(Uint8Array.from(bytes));
@@ -22,6 +22,14 @@ test('the settlement is the newest card share or action, ignoring anything else 
  ];
  assert.equal(findSettlement(history,PROGRAM,MATCH).signature,'settled');
  assert.equal(findSettlement(history.slice(0,4),PROGRAM,MATCH),null);
+});
+test('a receipt needs the match’s creation, because a node may have discarded the rest',()=>{
+ const creation=entry('created',[{program:PROGRAM,accounts:[A,B,MATCH,'System'],data:[1]}]);
+ assert.equal(hasCreation([action('later'),creation],PROGRAM,MATCH),true);
+ assert.equal(hasCreation([action('later')],PROGRAM,MATCH),false,'history that starts partway through');
+ assert.equal(hasCreation([entry('fake',[{program:OTHER,accounts:[A,B,MATCH],data:[1]}])],PROGRAM,MATCH),false,'another program');
+ assert.equal(hasCreation([entry('other',[{program:PROGRAM,accounts:[A,B,'AnotherMatch'],data:[1]}])],PROGRAM,MATCH),false,'another match');
+ assert.equal(hasCreation([entry('other-tag',[{program:PROGRAM,accounts:[A,B,MATCH],data:[2]}])],PROGRAM,MATCH),false,'another instruction');
 });
 test('only claims on this match count as claimed seats',()=>{
  const history=[entry('claim',[{program:PROGRAM,accounts:[MATCH,B,B],data:[20,0,0,0,0,0,0,0,0,1]}]),entry('elsewhere',[{program:PROGRAM,accounts:['AnotherMatch',A,A],data:[20,0,0,0,0,0,0,0,0,0]}]),action('settled')];

@@ -43,3 +43,8 @@ jobs:
           path: target/deploy/agent_stacks_escrow.so
           if-no-files-found: error
       - run: cargo test --workspace --locked
+      - name: Test the channel-only build too
+        run: |
+          npm run solana:build:channel
+          sha256sum target/deploy-channel/agent_stacks_escrow.so
+          AGENT_STACKS_PROGRAM_SO="$PWD/target/deploy-channel/agent_stacks_escrow.so" cargo test --workspace --locked --test channel

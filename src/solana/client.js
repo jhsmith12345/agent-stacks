@@ -90,7 +90,7 @@ export class ChainClient {
  // visible in the node's confirmed bank; on-chain execution remains authoritative.
  async simulate(bytes){
   const {value}=await this.connection.simulateTransaction(VersionedTransaction.deserialize(bytes),{sigVerify:true,replaceRecentBlockhash:false,commitment:'processed'});
-  if(value.err)throw new Error(`Transaction rejected in simulation and not sent: ${JSON.stringify(value.err)}`);
+  if(value.err)throw new Error(`Transaction rejected in simulation and not sent: ${JSON.stringify(value.err,(_,v)=>typeof v==='bigint'?v.toString():v)}`);
  }
  async submit(tx,{confirmation=this.commitment}={}){
   if(!this.networkChecked)await this.checkNetwork();

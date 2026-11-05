@@ -1,5 +1,6 @@
 //! Experimental multi-hand dealerless Hold'em, escrow, proofs and timeouts.
 //! Research code for devnet testing only; never use real funds.
+#![cfg_attr(feature = "channel-only", allow(dead_code, unused_imports))]
 use solana_program::{
     account_info::{next_account_info, AccountInfo},
     clock::Clock,
@@ -12,10 +13,13 @@ use solana_program::{
     sysvar::Sysvar,
 };
 pub mod cards;
+pub mod channel;
+#[cfg(not(feature = "channel-only"))]
 pub mod compact;
 pub mod game;
 pub mod play;
 pub mod proof;
+#[cfg(not(feature = "channel-only"))]
 pub mod shuffle;
 #[cfg(not(feature = "no-entrypoint"))]
 solana_program::entrypoint!(process_instruction);
@@ -128,10 +132,21 @@ pub fn shuffle_context(
     format!("agent-stacks/escrow/shuffle/v3/{program}/{account}/{hand}/{seat}/{hex}")
 }
 
+#[cfg(feature = "channel-only")]
+pub fn process_instruction(
+    program: &Pubkey,
+    accounts: &[AccountInfo],
+    instruction: &[u8],
+) -> ProgramResult {
+    let (&tag, args) = instruction.split_first().ok_or_else(fail)?;
+    check((30..=44).contains(&tag))?;
+    channel::process(program, accounts, tag, args)
+}
 // Tags: 0 verify DLEQ, 1 create, 2 join, 3 register key, 4 cooperative
 // settlement, 5 permissionless obligation timeout, 6 cancel invitation, 7 close,
 // 8–12 proof-account lifecycle, 13 consume verified shuffle, 14 card share, 15 action,
-// 16–19 joint shuffle buffers, 20 claim a deferred payout.
+// 16–19 joint shuffle buffers, 20 claim a deferred payout, 30–44 channel matches (see channel.rs).
+#[cfg(not(feature = "channel-only"))]
 pub fn process_instruction(
     program: &Pubkey,
     accounts: &[AccountInfo],
@@ -141,6 +156,9 @@ pub fn process_instruction(
     if tag == 0 {
         proof::verify(args, None)?;
         return Ok(());
+    }
+    if (30..=44).contains(&tag) {
+        return channel::process(program, accounts, tag, args);
     }
     let mut it = accounts.iter();
     if (8..=12).contains(&tag) {

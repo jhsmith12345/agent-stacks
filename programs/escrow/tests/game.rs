@@ -101,6 +101,87 @@ fn javascript_differential_rankings_and_randomized_betting_traces() {
 }
 
 #[test]
+fn channel_engine_matches_the_contract_byte_for_byte() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let result = Command::new("node")
+        .current_dir(root)
+        .arg("scripts/channel-game-vectors.js")
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let data: Value = serde_json::from_slice(&result.stdout).unwrap();
+    let cards = |v: &Value| -> Vec<u8> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_u64().unwrap() as u8)
+            .collect()
+    };
+    for rank in data["ranks"].as_array().unwrap() {
+        assert_eq!(
+            game::evaluate(&cards(&rank["cards"])).unwrap().to_vec(),
+            cards(&rank["score"])
+        );
+    }
+    let (mut moves, mut refused) = (0, 0);
+    for case in data["games"].as_array().unwrap() {
+        let mut g = Game::new(
+            pair(&case["stacks"]),
+            case["bb"].as_u64().unwrap(),
+            case["button"].as_u64().unwrap() as u8,
+        )
+        .unwrap();
+        for s in 0..2 {
+            let hole = cards(&case["holes"][s]);
+            g.holes[s] = [hole[0], hole[1]];
+        }
+        assert_eq!(hex::encode(g.encode()), case["initial"].as_str().unwrap());
+        for step in case["steps"].as_array().unwrap() {
+            match step["kind"].as_str().unwrap() {
+                "act" => {
+                    let mut copy = g.clone();
+                    let outcome = copy.act(
+                        step["seat"].as_u64().unwrap() as u8,
+                        step["action"].as_u64().unwrap() as u8,
+                        step["amount"].as_u64().unwrap(),
+                    );
+                    assert_eq!(outcome.is_ok(), step["ok"].as_bool().unwrap(), "{step}");
+                    if outcome.is_ok() {
+                        g = copy;
+                        moves += 1;
+                    } else {
+                        refused += 1;
+                        continue;
+                    }
+                }
+                "board" => {
+                    let start = match g.street {
+                        1 => 0,
+                        2 => 3,
+                        _ => 4,
+                    };
+                    for (i, c) in cards(&step["cards"]).iter().enumerate() {
+                        g.board[start + i] = *c;
+                    }
+                    g.resume_board().unwrap();
+                }
+                "showdown" => g.showdown().unwrap(),
+                _ => panic!("unknown step"),
+            }
+            assert_eq!(hex::encode(g.encode()), step["after"].as_str().unwrap());
+        }
+    }
+    assert!(
+        moves > 2000 && refused > 20,
+        "traces too thin: {moves} moves, {refused} refused"
+    );
+}
+
+#[test]
 fn next_hand_preserves_winnings_resets_secrets_and_stops_at_limit_or_bust() {
     use agent_stacks_escrow::{cards, play, DECK_OFFSET};
     let mut state = vec![0u8; play::SPACE];

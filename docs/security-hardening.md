@@ -65,6 +65,8 @@ The protected agent only accepts `network: test-only`; the existing network guar
 
 ## Required before a real-stake release
 
+These gates were written for the older full-proof path, where each player needs its own validating node. The [channel design](channel-design.md) is meant to replace that requirement. It removes the node from play, and it keeps gates 1, 3, 5 and 6, with gate 2 becoming separate-host runs of channel matches.
+
 1. Independent cryptographic analysis and independent Solana/client review of the complete frozen package; address findings and obtain regression review. See [the reviewer brief](external-audit-brief.md).
 2. Separate-host devnet runs using operator-controlled nodes, including strict fallback, missing funds, stale/unavailable nodes, crash recovery, deadline races and cost measurements. The [two-machine runbook](devnet-two-machines.md) has the procedure and the drills. A run through a hosted RPC labelled `--third-party-rpc` measures timing only and does not satisfy this gate.
 3. Review OS-level signer isolation, encrypted live-key custody, retention/backup restoration, wallet-wide spending policy and monitoring. A withholding relay is now routed around by redelivering the original bytes directly to the trusted node; this is tested locally, not on a public network.

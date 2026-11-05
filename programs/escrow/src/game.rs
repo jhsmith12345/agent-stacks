@@ -181,6 +181,10 @@ impl Game {
         self.progress();
         Ok(())
     }
+    /// A channel timeout: the player who missed the deadline folds, and only the pot changes hands.
+    pub fn forfeit(&mut self, loser: u8) {
+        self.award(Some(1 - loser), 2);
+    }
     pub fn resume_board(&mut self) -> Result<(), ProgramError> {
         ensure(self.stage == BOARD && (1..=3).contains(&self.street))?;
         let required = if self.street == 1 {

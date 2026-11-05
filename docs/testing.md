@@ -1,5 +1,69 @@
 # Local Solana integration reports
 
+## Channel matches
+
+These test the [channel design](channel-design.md), where agents play through signed messages and the contract only settles disputes. Each player's agent runs as its own process, and they share only a manifest and a relay. Everything below uses test funds, ran on one Mac, and hasn't been independently reviewed.
+
+### Public devnet, 2026-11-05
+
+Program `GQkM4Uo4hPx8qL4UqkaoA8CZDUGR9GgvZxBaN46UNEGd`, the channel-only build. Bytes dumped from chain matched `e0a2d27106d29706a393ac2a5ffa732d263ba39828b35470de66a5b2433b5a62`. It's upgradeable, with the project payer as authority, so it isn't trustless yet. Deploying took 16 seconds and 0.9075 test SOL.
+
+| Run | Match | Result |
+| --- | --- | --- |
+| Clean, 2 hands | `5MhN9QZgmf36ZEjv3t9MjKMnnNDgp6PV6wSknss67nYm` | 3 transactions on the match; 120 seconds with a 1-second relay poll, now 250 ms by default |
+| One player killed mid-hand, 30-second clock | `5M7PYJyWYyexe54tJboMYqFGB1zr7aDra9yuqJGMEVQj` | 7 transactions; 139 seconds to payout; the vanished player lost 20,000 of 1,000,000 lamports |
+
+After retiring the match and sweeping session keys, each run's net cost was about 0.0008 SOL, nearly all of it the permanent tombstone on the match address.
+
+### Local validator, with devnet's feature set
+
+`scripts/channel-rehearsal.js` runs these against the channel-only build. Rent and slot time stay at local defaults.
+
+| Scenario | What happens | Result |
+| --- | --- | --- |
+| Clean | 2 hands | 33 seconds, 3 transactions on the match |
+| Vanish | One agent is killed mid-hand, on a 30-second clock | The other is paid 82 seconds later; only the pot changes hands |
+| On-chain | The relay dies, and both agents stay up | They finish the hand with 22 verified on-chain moves, 28 transactions |
+| Stale | A player posts its old state 1 | The other answers with state 4 and wins the dispute |
+| Fork | A player signs two states at one step | The forger forfeits the whole escrow |
+| Lying RPC | The audit's card-leak attack (AS-03): the RPC says showdown is due | No hole-card share is released, and no transaction is broadcast |
+
+The older path needed 57 minutes and about 2,900 transactions for 2 hands in its [rehearsal](#two-machine-devnet-rehearsal).
+
+### Automated checks
+
+- **Engine against contract:** 600 random betting games and 3,000 hand rankings match byte for byte, including illegal moves. A whole hand with real keys, shuffles and proofs matches at every step in the SBF VM.
+- **Tests:** 26 for the contract in the VM, also run against the channel-only build. 36 for the agent and its dispute decisions.
+- **Compute:** at most 101,670 units for a share move and 7,098 for a betting move.
+
+Mutation checks break one rule at a time in a scratch copy and confirm a test fails. These aren't in CI, and the scripts stayed in a scratch directory.
+
+| Area | Caught | Not caught, and why |
+| --- | --- | --- |
+| Contract | 54 of 55 | Claiming a held payout twice: the Solana runtime separately refuses to take an account below its rent minimum |
+| Agent | 21 of 22 | Co-signing with its own move pending: the one-signature-per-step rule also stops it |
+| Dispute decisions | 11 of 11 | |
+
+The first mutation runs caught only about half: 32 of 48 in the contract and 11 of 22 in the agent. Most misses were tests failing for the wrong reason. The rollback test, for example, used bad signatures, so it passed even with the window rule removed. Those tests were rewritten.
+
+### Faults found by this work
+
+- **The terms weren't bound to what the contract stored (serious).** A creator could store its own session key in the joiner's seat, or a bigger stake, and the join would still succeed. With its own key in that seat, it could sign for both players and take the deposit. Found by review. The contract now computes the terms hash from what it stores, and a joiner must send the same value.
+- **Rollback and fork (design).** An early sketch let a player replay a withheld state after a card was revealed, or sign two versions of a step. The fixed challenge window and the forfeit for two signatures stop these.
+- **A relay connection reset killed an agent.** A lost message must never be fatal, so it now goes out again on the next resend.
+- **A half-uploaded buffer could block a later post,** and so miss the window. Each state now gets its own buffer.
+- **Agents dealt before the opponent had joined, and never refunded an expired invitation.** Both fixed.
+- **Junk from a relay could fill the agent's queue for early messages** and crowd out real ones. It now drops the oldest first.
+- **A rejected simulation crashed while formatting its error,** which hid the real reason. This was in the existing client.
+
+### What this doesn't show
+
+- It hasn't run on two machines. Both agents ran on one Mac through a local relay.
+- The relay has no matchmaking, and hasn't faced the public internet.
+- The deployed program is upgradeable, so the "deployer" row in the design doesn't hold yet.
+- Nobody independent has reviewed this design or code.
+- A hand plays out on chain only in tests and rehearsals, and the timeout-as-fold incentive argument is new.
+
 ## First public devnet run
 
 This was the first run on public devnet, on 2026-11-05: the deploy and the low-cost demo, through the public RPC, with both players on one Mac. Program bytecode and cryptography are unchanged.

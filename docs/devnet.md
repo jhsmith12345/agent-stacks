@@ -58,6 +58,8 @@ These are local test tokens. `play` creates a two-hand match and launches two is
 
 ## Public devnet, when funded
 
+This section covers the older full-proof and low-cost paths. New matches should use the [channel design](channel-design.md), which needs no node of your own.
+
 The [two-machine runbook](devnet-two-machines.md) has the full procedure, including what devnet looks like today and how to get test SOL. The SDK accepts the official devnet genesis hash and rejects other public clusters, including mainnet and testnet. Deployment/status can use a public devnet RPC; the protected agent must use a separately configured operator-controlled validating node, except in a test-funds timing run labelled with `--third-party-rpc`. Do not reuse a local policy against public devnet.
 
 ```sh

@@ -17,5 +17,8 @@ if (platformBin && !existsSync(platformBin)) {
 // Explicit PATH avoids changing the user's Rust toolchain or directory overrides.
 const env = { ...process.env };
 if (platformBin && existsSync(platformBin)) env.PATH = platformBin + delimiter + env.PATH;
-const result = spawnSync(command, ['--manifest-path', 'programs/escrow/Cargo.toml', '--no-rustup-override', '--arch', 'v0', '--', '--locked'], { stdio: 'inherit', env });
+// `--channel-only` builds just the channel court, into its own directory, leaving the default artifact alone.
+const channelOnly = process.argv.includes('--channel-only');
+const extra = channelOnly ? ['--features', 'channel-only', '--sbf-out-dir', 'target/deploy-channel'] : [];
+const result = spawnSync(command, ['--manifest-path', 'programs/escrow/Cargo.toml', '--no-rustup-override', '--arch', 'v0', ...extra, '--', '--locked'], { stdio: 'inherit', env });
 process.exit(result.status ?? 1);

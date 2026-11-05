@@ -84,10 +84,10 @@ mkdir -m 700 -p ~/agent-stacks-keys
 solana-keygen new --no-bip39-passphrase -o ~/agent-stacks-keys/player.json
 ```
 
-Each operator gets the program binary one of two ways, then compares its SHA-256 with the agreed value:
+Both operators need the same binary, because the policy step compares the deployed bytes with your copy and refuses a mismatch. The build currently depends on the operating system: two fresh Linux CI builds gave `3466e105…`, while a Mac build gives `9232974b…`. They're the same size and have the same instructions once addresses are masked, but the functions sit in a different order. Agree on one hash first, then get that binary one of two ways:
 
-- **Build it:** `npm run solana:build` after installing the verified tools. This is stronger evidence, and it covers the independent-host reproduction gate if the hash matches.
-- **Download it from CI:** `gh run download RUN_ID -n agent_stacks_escrow -D target/deploy`.
+- **Download it from CI:** this is the simplest, and machine A should deploy this copy too. Remove any local build first, then run `gh run download RUN_ID -n agent_stacks_escrow -D target/deploy`.
+- **Build it:** run `npm run solana:build` after installing the verified tools. This only matches a build from the same operating system. A Linux build that matches CI's hash is also evidence for the independent-host gate.
 
 ## Running the match
 

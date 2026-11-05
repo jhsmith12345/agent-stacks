@@ -54,6 +54,17 @@ The rehearsals found these faults in the new tooling, each now fixed and covered
 | Full verification | 39,746,478 CU | 39,733,032 CU |
 | DLEQ check | 16,929 CU | 16,932 CU |
 
+### Build host
+
+The same commit gives a different hash on a different operating system, so a matching hash across hosts isn't available yet.
+
+| Build | SHA-256 |
+| --- | --- |
+| Mac (pinned), and two clean rebuilds on the same host | `9232974b753314d5e7dbcde07a29b82596326cd1b2afedd1b12217f1542c376a` |
+| Linux CI, twice on fresh runners (run 41996681939, attempts 1 and 2) | `3466e105994f3c6554b3a77912f9121c12a783a775b71d6af71cff640645994e` |
+
+Both are 186,584 bytes. Their `.rodata`, symbols and section layout are identical, and only the sections holding code or addresses differ (`.text`, `.data.rel.ro` and `.rel.dyn`). `.text` holds the same 19,741 instructions once call targets and loaded values are masked. 13,889 of those are at the same position, which points to the same functions in a different order. That comparison doesn't prove the call targets match. CI's copy passed all 19 Rust tests, but the rehearsals above used only the Mac build. The cause hasn't been traced, and no build inside a Linux container on a Mac has been tried.
+
 ## Protected-agent v1 follow-up
 
 The [protected-agent implementation](security-hardening.md) was tested against a fresh loopback Agave validator with finalized confirmations and a pinned v5 artifact. This adds no on-chain instructions or changed cryptography. Test-only code/authority policy and explicit node ownership remain assumptions; the malicious configured-node attack is deliberately retained as a limitation test.

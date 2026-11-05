@@ -1,0 +1,38 @@
+name: CI
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  javascript:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm audit signatures
+      - run: npm test
+  program:
+    runs-on: ubuntu-latest
+    env:
+      SOLANA_RELEASE: solana-release-x86_64-unknown-linux-gnu.tar.bz2
+      SOLANA_RELEASE_SHA256: 3363f4728fe786ac7036e342a20df928aa2e3e43f807fbdce67814840538c574 # official v4.4.0 release digest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - name: Install verified Solana tools
+        run: |
+          mkdir -p .tools
+          curl -fsSL -o ".tools/$SOLANA_RELEASE" "https://github.com/anza-xyz/agave/releases/download/v4.4.0/$SOLANA_RELEASE"
+          echo "$SOLANA_RELEASE_SHA256  .tools/$SOLANA_RELEASE" | sha256sum -c -
+          tar -xjf ".tools/$SOLANA_RELEASE" -C .tools
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: npm run solana:build
+      - run: cargo test --workspace --locked

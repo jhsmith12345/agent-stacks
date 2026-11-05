@@ -1,0 +1,34 @@
+{
+  "name": "agent-stacks",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "description": "Agent-native poker with an experimental dealerless protocol and multi-hand Solana escrow.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "demo": "node examples/demo.js",
+    "test": "node --test",
+    "agent": "node src/cli.js",
+    "demo:peer": "node examples/peer-demo.js",
+    "verify:peer": "node scripts/verify-transcript.js",
+    "solana:build": "node scripts/build-solana.js",
+    "solana:test": "cargo test --workspace -- --nocapture",
+    "devnet:status": "node scripts/devnet.js status",
+    "devnet:deploy": "node scripts/devnet.js deploy",
+    "devnet:play": "node scripts/devnet.js play",
+    "security:test": "node --test test/trusted-agent.test.js test/rpc-trust.test.js test/encrypted-backup.test.js test/solana-client.test.js test/private-files.test.js test/agent-recovery.test.js",
+    "security:attest": "node scripts/attest-program.js",
+    "security:reproduce": "node scripts/reproduce-build.js",
+    "security:bundle": "node scripts/release-bundle.js",
+    "tools:verify": "shasum -a 256 -c solana-tools.sha256",
+    "check": "node --test && cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked"
+  },
+  "dependencies": {
+    "@noble/curves": "2.4.0",
+    "@solana/kit": "8.6.0",
+    "@solana/web3.js": "3.1.1"
+  }
+}

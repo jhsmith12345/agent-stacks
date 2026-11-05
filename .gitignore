@@ -1,0 +1,14 @@
+node_modules/
+.agent-stacks/
+*.key.json
+.DS_Store
+.tools/
+target/
+*-keypair.json
+.env
+.env.*
+*.private.json
+*.guard.json
+*.shuffle.bin
+*.rent-returned.json
+transactions.ndjson

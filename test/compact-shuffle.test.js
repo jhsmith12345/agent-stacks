@@ -1,0 +1,38 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {ChainClient,Keypair,PublicKey,shuffleContext} from '../src/solana/client.js';
+import {COMPACT_SPACE,deckBytes,deckHash,compactTransaction,signVerifiedShuffle} from '../src/solana/compact-shuffle.js';
+import {makeKey} from '../src/mental-poker/proofs.js';
+import {point} from '../src/mental-poker/group.js';
+import {initialDeck} from '../src/mental-poker/deck.js';
+import {shuffleAndProve,encodeShuffle,decodeShuffle} from '../src/mental-poker/shuffle.js';
+
+test('joint acceptance independently verifies the full proof and signs only the exact bound deck transaction',async()=>{
+ const [actor,peer,program,match,buffer]=await Promise.all(Array.from({length:5},()=>Keypair.generate()));
+ const config={program:program.publicKey.toBase58(),match:match.publicKey.toBase58(),players:[actor.publicKey.toBase58(),peer.publicKey.toBase58()],terms:'ab'.repeat(32)};
+ const keys=[makeKey('test/key/0'),makeKey('test/key/1')].map(k=>k.registration.publicKey);
+ const m={phase:3,handNo:1,version:4,keys,deck:initialDeck()};
+ const joint=point(keys[0],true).add(point(keys[1],true)).toHex();
+ const context=shuffleContext(config.program,config.match,0,config.terms,1);
+ const proof=shuffleAndProve(m.deck,joint,context),wire=encodeShuffle(m.deck,proof);
+ const decoded=decodeShuffle(wire);assert.deepEqual(decoded.input,m.deck);assert.deepEqual(decoded.proof,proof);
+ assert.throws(()=>decodeShuffle(wire.subarray(0,-1)),/framing/);
+ assert.throws(()=>decodeShuffle(Buffer.concat([wire,Buffer.of(0)])),/framing/);
+ const data=Buffer.alloc(COMPACT_SPACE);data.write('ASTKDK01');data.set(actor.publicKey.toBytes(),8);data.set(match.publicKey.toBytes(),40);data.writeUInt32LE(1,72);data[76]=0;data.writeUInt32LE(3328,77);deckBytes(proof.output).copy(data,81);
+ const client=new ChainClient('https://api.devnet.solana.com',program.publicKey,peer);client.networkChecked=true;
+ client.match=async()=>structuredClone(m);client.connection={getAccountInfo:async()=>({owner:program.publicKey,data})};
+ const offer={protocol:'agent-stacks/joint-shuffle/v1',match:config.match,handNo:1,version:4,buffer:buffer.publicKey.toBase58(),outputHash:deckHash(proof.output),blockhash:'11111111111111111111111111111111',lastValidBlockHeight:'100',wire:wire.toString('base64'),instructions:['malicious relay instruction must be ignored']};
+ const sign=o=>signVerifiedShuffle(client,config,peer,o,{allowCooperative:true});
+ await assert.rejects(signVerifiedShuffle(client,config,peer,offer),/disabled/);
+ for(const changed of [{handNo:2},{version:5},{match:buffer.publicKey.toBase58()},{protocol:'other'},{lastValidBlockHeight:'9'.repeat(1000)},{lastValidBlockHeight:'18446744073709551616'},{lastValidBlockHeight:'0'},{buffer:'x'.repeat(1000)},{blockhash:'invalid'}])await assert.rejects(sign({...offer,...changed}),/Stale or invalid/);
+ await assert.rejects(sign({...offer,wire:'AA=='}),/Truncated/);
+ const corrupted=Buffer.from(wire);corrupted[corrupted.length-1]^=1;
+ await assert.rejects(sign({...offer,wire:corrupted.toString('base64')}),/Invalid cooperative shuffle proof/);
+ await assert.rejects(sign({...offer,outputHash:'00'.repeat(32)}),/Invalid cooperative shuffle proof/);
+ data[81]^=1;await assert.rejects(sign(offer),/differs from verified/);data[81]^=1;
+ const approval=await sign(offer);
+ const tx=compactTransaction(client,config,m,offer);await tx.sign(actor);tx.addSignature(peer.publicKey,Buffer.from(approval.signature,'base64'));
+ assert.equal(await tx.verifySignatures(),true);assert.equal(tx.instructions.length,1);assert.equal(tx.instructions[0].data[0],18);
+ assert.equal(tx.feePayer.toBase58(),config.players[0]);assert.ok((await tx.serialize()).length<=1232);
+ const changed=compactTransaction(client,config,m,{...offer,outputHash:'ff'.repeat(32)});await changed.sign(actor);changed.addSignature(peer.publicKey,Buffer.from(approval.signature,'base64'));assert.equal(await changed.verifySignatures(),false);
+});

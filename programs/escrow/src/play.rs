@@ -140,6 +140,7 @@ pub fn share(
     state: &mut [u8],
     seat: usize,
     args: &[u8],
+    first_shower: usize,
 ) -> Result<(), ProgramError> {
     check(args.len() > 9)?;
     let mut g = read(state)?;
@@ -188,10 +189,14 @@ pub fn share(
                 g.resume_board()?;
                 sync(state, &g)?;
             }
-            SHOW_A => state[8] = SHOW_B,
-            SHOW_B => {
-                g.showdown()?;
-                sync(state, &g)?;
+            SHOW_A | SHOW_B => {
+                let first = if first_shower == 0 { SHOW_A } else { SHOW_B };
+                if phase == first {
+                    state[8] = if first == SHOW_A { SHOW_B } else { SHOW_A };
+                } else {
+                    g.showdown()?;
+                    sync(state, &g)?;
+                }
             }
             _ => return Err(fail()),
         }

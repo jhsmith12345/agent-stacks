@@ -6,11 +6,12 @@ import {STAGE} from './peer.js';
 import {fromHex} from './wire.js';
 import {COMPLETE,EXIT,OPEN,WAITING} from './chain.js';
 const quiet=error=>!!(error.rpcFailure||error.notSent||error.signature);
+const MAX_QUEUED=64;
 export class ChannelRunner{
- constructor({peer,chains,transport,bufferKey,stallMs=60_000,resendMs=5_000,pollMs=250,chainPollMs=15_000,log=()=>{}}){
-  Object.assign(this,{peer,chains,transport,bufferKey,stallMs,resendMs,pollMs,chainPollMs,log});
+ constructor({peer,chains,transport,bufferKey,stallMs=60_000,resendMs=5_000,pollMs=250,chainPollMs=15_000,disputePollMs=5_000,log=()=>{}}){
+  Object.assign(this,{peer,chains,transport,bufferKey,stallMs,resendMs,pollMs,chainPollMs,disputePollMs,log});
   this.progressAt=Date.now();this.resentAt=0;this.chainAt=0;this.seen=null;this.stats={onChainTransactions:0,relayMessages:0};
-  this.bufferAttempts=new Map();this.buffers=new Map();
+  this.bufferAttempts=new Map();this.buffers=new Map();this.inbox=[];this.outgoing=[];this.sending=null;this.receiving=null;
  }
  get chain(){return this.chains[0];}
  message(kind,seq,payloadHash){return signedMessage(this.peer.binding,kind,seq,payloadHash);}
@@ -21,12 +22,26 @@ export class ChannelRunner{
   if(!states.length){const failed=results.find(r=>r.status==='rejected');if(failed)throw failed.reason;return null;}
   return states.reduce((best,s)=>(s.retired||(s.version??0)>(best.version??0))?s:best);
  }
+ // Relay traffic never holds up the chain checks. A relay that silently drops packets makes each request
+ // hang until it times out, and an agent waiting on that could miss a deadline on chain.
  // A lost message is never fatal: it stays in the outbox and goes again on the next resend.
  async send(messages){
-  for(const m of messages){
+  this.outgoing.push(...messages);
+  if(this.outgoing.length>MAX_QUEUED)this.outgoing.splice(0,this.outgoing.length-MAX_QUEUED);
+  if(!this.sending)this.sending=this.drain().finally(()=>{this.sending=null;});
+ }
+ async drain(){
+  while(this.outgoing.length){
+   const m=this.outgoing.shift();
    try{await this.transport.send(m);this.stats.relayMessages++;}
    catch(error){this.log(`relay send failed, will resend: ${error.message}`);}
   }
+ }
+ pumpRelay(){
+  if(this.receiving)return;
+  this.receiving=Promise.resolve().then(()=>this.transport.receive())
+   .then(messages=>{this.inbox.push(...messages);},error=>{this.log(`relay: ${error.message}`);})
+   .finally(()=>{this.receiving=null;});
  }
  async submit(label,work){
   this.log(`on-chain: ${label}`);
@@ -63,16 +78,20 @@ export class ChannelRunner{
  }
  async tick(){
   const peer=this.peer,now=Date.now();
-  let incoming=[];
-  try{incoming=await this.transport.receive();}catch(error){this.log(`relay: ${error.message}`);}
-  for(const m of incoming)await this.send(peer.receive(m));
+  this.pumpRelay();
+  for(const m of this.inbox.splice(0))await this.send(peer.receive(m));
   const progress=peer.progress();
   if(progress!==this.seen){this.seen=progress;this.progressAt=now;}
   if(peer.state.evidence&&!this.reportedFork){await this.forkProof();}
-  if(!peer.state.disputed&&peer.state.stage!==STAGE.CLOSED&&now-this.resentAt>this.resendMs){this.resentAt=now;await this.send(peer.resend());}
-  if(peer.state.stage===STAGE.CLOSED&&!peer.state.disputed)return this.settleClosed();
-  if(now-this.chainAt<this.chainPollMs&&!peer.state.disputed&&now-this.progressAt<this.stallMs)return null;
+  if(!peer.state.disputed&&peer.state.stage!==STAGE.CLOSED&&now-this.resentAt>this.resendMs&&!this.outgoing.length){this.resentAt=now;await this.send(peer.resend());}
+  // Chain reads stay paced even in a dispute, which can mean waiting out a long window. Public RPCs
+  // rate limit by address, and an agent hammering one only slows itself and anyone sharing its address.
+  const busy=peer.state.disputed||peer.state.stage===STAGE.CLOSED;
+  const stalled=now-this.progressAt>=this.stallMs&&peer.state.stage!==STAGE.CLOSED;
+  const interval=busy||stalled?Math.min(this.chainPollMs,this.disputePollMs):this.chainPollMs;
+  if(now-this.chainAt<interval)return null;
   this.chainAt=now;
+  if(peer.state.stage===STAGE.CLOSED&&!peer.state.disputed)return this.settleClosed();
   let state;
   try{state=await this.readChain();}catch(error){if(!quiet(error))this.log(`chain read: ${error.message}`);return null;}
   if(!state){return null;}
@@ -139,9 +158,10 @@ export class ChannelRunner{
    // Catch up on what the opponent did, verifying each step and its signature.
    const moves=await this.chain.onChainMoves(local);
    for(let seq=local+1;seq<=state.seq;seq++){
+    // Our own signed move can reach the chain as the opponent's post, which isn't a move transaction.
+    if(st.mine?.seq===seq){peer.confirmChainMove(seq);continue;}
     const move=moves.get(seq);
     if(!move){this.log(`Waiting to see the opponent’s move ${seq}`);return;}
-    if(st.mine?.seq===seq){peer.confirmChainMove(seq);continue;}
     peer.acceptChainMove(seq,move.step,move.signature);
    }
   }else if(local>state.seq){

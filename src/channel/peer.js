@@ -8,7 +8,7 @@ import {shuffleAndProve,encodeShuffle,decodeShuffle,verifyShuffle} from '../ment
 import {mul,point,scalar} from '../mental-poker/group.js';
 import {signMessage,verifySignature} from './keys.js';
 import {fromHex,toHex,encodeDLEQ} from './wire.js';
-import {acceptedHand,applyAction,applyShare,closePayload,decodeHand,encodeHand,KIND_CLOSE,KIND_HAND,KIND_STACKS,obligated,owedPositions,P_BETTING,P_DONE,sha256,signedMessage,stacksPayload} from './engine.js';
+import {acceptedHand,applyAction,applyMuck,applyShare,closePayload,decodeHand,encodeHand,evaluate,greater,mayMuck,KIND_CLOSE,KIND_HAND,KIND_STACKS,obligated,owedPositions,P_BETTING,P_DONE,sha256,signedMessage,stacksPayload} from './engine.js';
 export const STAGE={KEYS:'keys',SHUFFLE:'shuffle',PLAY:'play',AGREE:'agree',CLOSED:'closed'};
 const MAX_WIRE=1_000_000,MAX_HELD=16;
 const CARD_POINTS=new Map(initialDeck().map((c,i)=>[c.b,i]));
@@ -16,8 +16,10 @@ const clone=value=>structuredClone(value);
 
 export class ChannelPeer{
  // config: {program,match,terms,programBytes,matchBytes,termsBytes,sessions:[hex,hex],buyIn,bigBlind,maxHands}
- constructor(config,session,seat,{strategy,store=null,state=null}){
-  this.config=config;this.session=session;this.seat=seat;this.strategy=strategy;this.store=store;this.held=[];
+ // `reveal` decides, when this player is second to show, whether to show (true) or muck (false). By
+ // default it shows a hand that wins or ties, and mucks one that loses, since showing that gains nothing.
+ constructor(config,session,seat,{strategy,store=null,state=null,reveal=null}){
+  this.config=config;this.session=session;this.seat=seat;this.strategy=strategy;this.store=store;this.held=[];this.reveal=reveal;
   this.keys=config.sessions.map(k=>fromHex(k,32));
   if(!this.keys[seat].equals(session.publicKey))throw Error('This session key is not in the match');
   this.binding={program:config.programBytes,match:config.matchBytes,terms:config.termsBytes};
@@ -191,7 +193,8 @@ export class ChannelPeer{
  }
  applyStep(s,seat,step){
   if(!step||typeof step!=='object')throw Error('Invalid step');
-  if(step.logical!==undefined){
+  if(step.muck===true)applyMuck(s,seat);
+  else if(step.logical!==undefined){
    const context=shareContext(this.config.program,this.config.match,s.phase,seat,step.logical,this.config.terms,s.hand);
    applyShare(s,context,seat,step.logical,fromHex(step.wire));
   }else applyAction(s,seat,step.action,step.amount??0);
@@ -252,8 +255,19 @@ export class ChannelPeer{
   if(st.latest?.seq!==st.seq||st.latest.kind!==KIND_HAND||!st.latest.sigs[this.opponent])throw Error('The current state is not signed by the opponent');
   if(!encodeHand(s).equals(fromHex(st.latest.payload)))throw Error('Local state differs from the signed state');
   if(obligated(s)!==this.seat)throw Error('This agent owes nothing now');
+  return this.nextStep(s);
+ }
+ nextStep(s){
   if(s.phase===P_BETTING)return this.chooseAction(s);
+  if(mayMuck(s)&&!this.choosesToShow(s))return {muck:true};
   return this.shareStep(s);
+ }
+ choosesToShow(s){
+  const cards=this.myCards(s),opponentCards=s.game.holes[this.opponent],board=s.game.board;
+  const mine=evaluate([...cards,...board]),theirs=evaluate([...opponentCards,...board]);
+  const view={hand:s.hand,seat:this.seat,cards,opponentCards,board:[...board],winning:greater(mine,theirs),tied:!greater(mine,theirs)&&!greater(theirs,mine),pot:s.game.contributed[0]+s.game.contributed[1]};
+  // A bad answer can only mean showing or mucking, and both are this player's to choose.
+  return this.reveal?!!this.reveal(view):view.winning||view.tied;
  }
  shareStep(s){
   const logical=owedPositions(s)[s.cursor],c=s.cards[logical];
@@ -303,7 +317,7 @@ export class ChannelPeer{
   }else{
    if(st.seq!==chainSeq)throw Error('Local state is not at the chain’s step');
    if(obligated(st.s)!==this.seat)throw Error('This agent owes nothing now');
-   const s=clone(st.s),step=s.phase===P_BETTING?this.chooseAction(s):this.shareStep(s);
+   const s=clone(st.s),step=this.nextStep(s);
    this.applyStep(s,this.seat,step);
    const sig=this.sign(KIND_HAND,seq,sha256(encodeHand(s)));
    st.s=s;st.mine={kind:KIND_HAND,seq,sig:toHex(sig),step};

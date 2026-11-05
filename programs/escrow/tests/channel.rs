@@ -979,6 +979,10 @@ fn both_signing_a_state_cannot_make_money_out_of_nothing() {
         h.post_state(&v["wrongStage"]).is_err(),
         "the phase and game stage must agree"
     );
+    assert!(
+        h.post_state(&v["badAggressor"]).is_err(),
+        "only a seat or nobody can be the player who got called"
+    );
     assert_eq!(h.phase(), channel::OPEN);
 }
 #[test]
@@ -1338,8 +1342,11 @@ fn a_buffer_cannot_be_reset_overrun_or_written_out_of_order() {
     );
     assert!(h.send(&[&a], vec![write(600, &blob[..10])]).is_err(), "gap");
     h.send(&[&a], vec![write(500, &blob[500..1000])]).unwrap();
-    h.send(&[&a], vec![write(1000, &blob[1000..1311])]).unwrap();
-    assert!(h.send(&[&a], vec![write(1311, &[1])]).is_err(), "overrun");
+    h.send(&[&a], vec![write(1000, &blob[1000..])]).unwrap();
+    assert!(
+        h.send(&[&a], vec![write(blob.len() as u32, &[1])]).is_err(),
+        "overrun"
+    );
     // An account that already holds a buffer can't be initialized over.
     let again = Instruction {
         program_id: PROGRAM,
@@ -1408,4 +1415,185 @@ fn a_settlement_pays_only_the_two_players_and_only_the_creator_retires() {
     );
     assert!(h.send(&[&wallet_b()], vec![as_opponent]).is_err());
     assert_eq!(h.phase(), channel::COMPLETE);
+}
+fn play_trace(h: &mut H, trace: &Value, upto: usize) {
+    h.post_state(&vectors()["accept"]).unwrap();
+    let window = h.window();
+    h.at(window);
+    for (i, step) in trace["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .take(upto)
+        .enumerate()
+    {
+        let result = h.apply(step);
+        result.unwrap_or_else(|e| panic!("step {i}: {:?}", e.meta.logs));
+        assert_eq!(
+            hex::encode(channel::blob(&h.state())),
+            step["blob"].as_str().unwrap(),
+            "step {i}"
+        );
+    }
+}
+fn first_show_step(trace: &Value) -> usize {
+    trace["illegal"]["firstMuck"]["index"].as_u64().unwrap() as usize
+}
+const SHOW_A: u8 = 11;
+const SHOW_B: u8 = 12;
+#[test]
+fn whoever_got_called_shows_first_and_the_caller_can_then_muck() {
+    let trace = &vectors()["traces"]["riverBetMucked"];
+    assert_eq!(trace["first"], 0, "seat 0 bet the river and got called");
+    let mut h = H::joined();
+    play_trace(&mut h, trace, first_show_step(trace));
+    assert_eq!(h.phase(), SHOW_A, "the player who got called shows first");
+    let steps = trace["steps"].as_array().unwrap();
+    for step in &steps[first_show_step(trace)..] {
+        h.apply(step).unwrap();
+    }
+    assert_eq!(steps.last().unwrap()["tag"], 45);
+    assert_eq!(h.phase(), channel::EXIT);
+    let state = h.state();
+    assert_eq!(
+        hex::encode(channel::blob(&state)),
+        steps.last().unwrap()["blob"].as_str().unwrap()
+    );
+    // The first player's cards are public, and the mucked ones were never revealed.
+    let g = play::read(&state).unwrap();
+    assert!(g.holes[0].iter().all(|c| *c < 52));
+    assert_eq!(g.holes[1], [255, 255]);
+    assert_eq!(g.reason, 3);
+    assert_eq!(g.winner, 0);
+    for logical in [1usize, 3] {
+        let slot = play::SHARES_OFFSET + logical * 64 + 32;
+        assert_eq!(
+            state[slot..slot + 32],
+            [0; 32],
+            "no share for a mucked card"
+        );
+    }
+    let (a, b) = (h.lamports(&h.a.pubkey()), h.lamports(&h.b.pubkey()));
+    h.timeout().unwrap();
+    assert_eq!(
+        h.lamports(&h.a.pubkey()),
+        a + trace["final"][0].as_u64().unwrap()
+    );
+    assert_eq!(
+        h.lamports(&h.b.pubkey()),
+        b + trace["final"][1].as_u64().unwrap()
+    );
+    assert!(
+        trace["final"][0].as_u64().unwrap() > BUY_IN,
+        "the pot went to the player who showed"
+    );
+}
+#[test]
+fn a_caller_who_wants_to_show_can_and_the_best_hand_wins() {
+    let trace = &vectors()["traces"]["riverBetShown"];
+    let mut h = H::joined();
+    let count = trace["steps"].as_array().unwrap().len();
+    play_trace(&mut h, trace, count);
+    assert_eq!(h.phase(), channel::EXIT);
+    let g = play::read(&h.state()).unwrap();
+    assert_eq!(g.reason, 1, "settled by comparing hands");
+    assert!(g.holes.iter().flatten().all(|c| *c < 52));
+}
+#[test]
+fn with_no_bet_on_the_river_the_first_to_act_shows_first() {
+    let trace = &vectors()["traces"]["checkedDownMucked"];
+    assert_eq!(
+        trace["first"], 1,
+        "the button is seat 0, so seat 1 acts first"
+    );
+    let mut h = H::joined();
+    play_trace(&mut h, trace, first_show_step(trace));
+    assert_eq!(h.phase(), SHOW_B);
+    for step in &trace["steps"].as_array().unwrap()[first_show_step(trace)..] {
+        h.apply(step).unwrap();
+    }
+    assert_eq!(play::read(&h.state()).unwrap().winner, 1);
+}
+#[test]
+fn an_earlier_bet_does_not_count_once_a_later_street_is_checked_through() {
+    // The main hand raises on the flop, and the river is checked through.
+    let v = vectors();
+    assert_eq!(
+        v["mainFirst"], 1,
+        "the river's first to act, not the flop's raiser"
+    );
+}
+#[test]
+fn an_all_in_that_gets_called_shows_first_after_the_board_runs_out() {
+    let trace = &vectors()["traces"]["allInCalled"];
+    assert_eq!(
+        trace["first"], 0,
+        "seat 0 shoved, and no betting could follow"
+    );
+    let mut h = H::joined();
+    play_trace(&mut h, trace, first_show_step(trace));
+    assert_eq!(h.phase(), SHOW_A);
+    let count = trace["steps"].as_array().unwrap().len();
+    for step in &trace["steps"].as_array().unwrap()[first_show_step(trace)..count] {
+        h.apply(step).unwrap();
+    }
+    assert_eq!(h.phase(), channel::EXIT);
+}
+#[test]
+fn the_player_who_got_called_cannot_muck_even_with_a_valid_signature() {
+    let trace = &vectors()["traces"]["riverBetShown"];
+    let mut h = H::joined();
+    play_trace(&mut h, trace, first_show_step(trace));
+    let before = h.state();
+    assert!(h.apply(&trace["illegal"]["firstMuck"]).is_err());
+    assert_eq!(h.state(), before);
+    h.apply(&trace["steps"][first_show_step(trace)]).unwrap();
+}
+#[test]
+fn a_hand_cannot_be_mucked_once_part_of_it_is_shown() {
+    let trace = &vectors()["traces"]["riverBetShown"];
+    let illegal = &trace["illegal"]["partialMuck"];
+    let mut h = H::joined();
+    play_trace(&mut h, trace, illegal["index"].as_u64().unwrap() as usize);
+    assert_eq!(h.state()[play::CURSOR], 1);
+    let before = h.state();
+    assert!(h.apply(illegal).is_err());
+    assert_eq!(h.state(), before);
+}
+#[test]
+fn a_muck_is_refused_before_showdown_and_needs_the_movers_signature() {
+    let trace = &vectors()["traces"]["riverBetMucked"];
+    let steps = trace["steps"].as_array().unwrap();
+    let mut h = H::joined();
+    play_trace(&mut h, trace, 3);
+    // Mucking early, with the signature from the real muck later on.
+    let mut early = steps.last().unwrap().clone();
+    early["seq"] = Value::from(4);
+    assert!(h.apply(&early).is_err());
+    let mut h = H::joined();
+    play_trace(&mut h, trace, steps.len() - 1);
+    // The right moment, with a signature over some other state.
+    let mut unsigned = steps.last().unwrap().clone();
+    unsigned["message"] = steps[steps.len() - 2]["message"].clone();
+    unsigned["signature"] = steps[steps.len() - 2]["signature"].clone();
+    assert!(h.apply(&unsigned).is_err());
+    // A player who owes nothing can't send it either.
+    let mut other = steps.last().unwrap().clone();
+    other["seat"] = Value::from(0);
+    assert!(h.apply(&other).is_err());
+    h.apply(steps.last().unwrap()).unwrap();
+}
+#[test]
+fn a_timed_out_showdown_counts_as_a_fold_and_reveals_nothing_more() {
+    let trace = &vectors()["traces"]["riverBetMucked"];
+    let mut h = H::joined();
+    play_trace(&mut h, trace, first_show_step(trace));
+    // The called player refuses to show. Its cards stay hidden, and it loses the pot.
+    let deadline = h.deadline();
+    h.at(deadline);
+    let (a, b) = (h.lamports(&h.a.pubkey()), h.lamports(&h.b.pubkey()));
+    h.timeout().unwrap();
+    let g = play::read(&h.state()).unwrap();
+    assert_eq!(g.holes, [[255, 255], [255, 255]]);
+    assert!(h.lamports(&h.b.pubkey()) - b > h.lamports(&h.a.pubkey()) - a);
 }

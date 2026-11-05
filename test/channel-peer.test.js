@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {ChannelPeer,STAGE} from '../src/channel/peer.js';
 import {sessionFromSeed,signMessage as signFor,verifySignature} from '../src/channel/keys.js';
-import {act,applyShare,newGame,KIND_CLOSE,KIND_HAND,signedMessage,sha256,P_HOLE_B,encodeHand,owedPositions,parseShare} from '../src/channel/engine.js';
+import {acceptedHand,act,applyAction,applyMuck,applyShare,decodeHand,evaluate,firstShower,greater,mayMuck,newGame,KIND_CLOSE,KIND_HAND,signedMessage,sha256,P_BETTING,P_DONE,P_HOLE_B,encodeHand,owedPositions,parseShare} from '../src/channel/engine.js';
 import {shareContext} from '../src/solana/client.js';
 import {decryptionShare} from '../src/mental-poker/deck.js';
 import {proveDLEQ} from '../src/mental-poker/proofs.js';
@@ -348,4 +348,92 @@ test('a player can only bet on their own turn, with only a legal amount',()=>{
  assert.throws(()=>act(fresh(),0,2,-1),/Invalid amount/);
  const called=fresh();act(called,0,2,0);
  assert.equal(called.stacks[0]+called.contributed[0],1_000_000,'chips are conserved');
+});
+// Showing and mucking. Hand 1's button is seat 0, so with no bet on the river seat 1 shows first.
+const checkEverything=view=>({action:view.owed>0?2:1});
+const betRiverAsSeat0=view=>view.street===3&&view.seat===0&&view.owed===0?{action:3,amount:60_000}:{action:view.owed>0?2:1};
+function playHand(strategies,reveals){
+ const cfg=config();
+ const pair=[0,1].map(seat=>new ChannelPeer(cfg,sessions[seat],seat,{strategy:strategies[seat],reveal:reveals?.[seat]??null}));
+ const sent=run(pair[0],pair[1]);
+ return {a:pair[0],b:pair[1],sent};
+}
+test('a caller who chooses to muck gives up the pot, and its cards stay hidden for good',{timeout:60000},()=>{
+ const {a,b,sent}=playHand([betRiverAsSeat0,checkEverything],[null,()=>false]);
+ assert.equal(a.state.stage,STAGE.CLOSED);assert.equal(b.state.stage,STAGE.CLOSED);
+ // Seat 0 bet the river and got called, so it showed. Seat 1 mucked.
+ assert.equal(sent[1].filter(m=>m.type==='move'&&m.step?.muck===true).length,1);
+ assert.deepEqual(a.state.final,[1_080_000,920_000]);
+ assert.deepEqual(a.state.s.game.holes[1],[255,255],'the opponent never learns the mucked cards');
+ assert.ok(a.state.s.game.holes[0].every(c=>c<52),'the called player’s cards are public');
+ assert.equal(a.state.s.game.reason,3);
+ const zero='00'.repeat(32);
+ for(const state of [a.state,b.state])for(const logical of [1,3])assert.equal(state.s.shares[logical][1],zero,'no share for a mucked card was ever released');
+ // Seat 1's own shares for its own cards are the ones that would reveal them, and none was ever sent.
+ const revealed=sent[1].filter(m=>m.type==='move'&&m.step?.logical!==undefined&&m.seq>4).map(m=>m.step.logical);
+ assert.equal(revealed.some(logical=>logical===1||logical===3),false);
+});
+test('a caller who chooses to show reveals, and the hands are compared',{timeout:60000},()=>{
+ const {a}=playHand([betRiverAsSeat0,checkEverything],[null,()=>true]);
+ assert.equal(a.state.s.game.reason,1);
+ assert.ok(a.state.s.game.holes.flat().every(c=>c<52));
+ assert.equal(a.state.final[0]+a.state.final[1],2_000_000);
+});
+test('by default an agent shows a hand that wins or ties, and mucks one that loses',{timeout:60000},()=>{
+ const {a,b}=playHand([betRiverAsSeat0,checkEverything]);
+ const game=a.state.s.game,mine=b.myCards(b.state.s),board=game.board;
+ const theirs=evaluate([...game.holes[0],...board]),ours=evaluate([...mine,...board]);
+ if(greater(theirs,ours)){assert.equal(game.reason,3,'a losing caller mucked');assert.deepEqual(game.holes[1],[255,255]);}
+ else{assert.equal(game.reason,1,'a winning or tied caller showed');assert.deepEqual(game.holes[1],mine);}
+});
+test('the decision rests on the real comparison',()=>{
+ // Seat 1 holds aces. Seat 0 showed kings. Seat 1 wins with this board, then loses with a straight on it.
+ const card=(rank,suit)=>'23456789TJQKA'.indexOf(rank)*4+'cdhs'.indexOf(suit);
+ const peerFor=(reveal=null)=>{const p=new ChannelPeer(config(),sessions[1],1,{strategy:calling,reveal});p.myCards=()=>[card('A','s'),card('A','h')];return p;};
+ const state=board=>({hand:1,game:{holes:[[card('K','s'),card('K','h')],[255,255]],board,contributed:[60_000,60_000]}});
+ const safe=[card('2','c'),card('7','d'),card('9','c'),card('J','d'),card('3','h')];
+ assert.equal(peerFor().choosesToShow(state(safe)),true,'a winning hand is shown');
+ const kings=[card('K','c'),card('2','d'),card('7','c'),card('J','d'),card('3','h')];
+ assert.equal(peerFor().choosesToShow(state(kings)),false,'a losing hand is mucked');
+ const tied={...state([card('T','c'),card('J','c'),card('Q','c'),card('K','c'),card('A','c')])};
+ assert.equal(peerFor().choosesToShow(tied),true,'a tied hand is shown, to claim its half');
+ const views=[];
+ assert.equal(peerFor(v=>{views.push(v);return true;}).choosesToShow(state(kings)),true,'a player may show a loser if it wants to');
+ assert.equal(views[0].winning,false);assert.equal(views[0].pot,120_000);
+ assert.equal(peerFor(()=>false).choosesToShow(state(safe)),false,'and may even muck a winner');
+});
+test('only the player second to show can muck, and only before showing anything',()=>{
+ const deck=Array.from({length:52},()=>({a:'11'.repeat(32),b:'22'.repeat(32)}));
+ const hand=()=>{const s=acceptedHand({hand:1,keys:['33'.repeat(32),'44'.repeat(32)],deck,stacks:[1_000_000,1_000_000],bigBlind:20_000});s.phase=P_BETTING;return s;};
+ const atShowdown=aggressor=>{const s=hand();s.game.stage=2;s.game.actor=255;s.aggressor=aggressor;s.phase=aggressor===0?11:12;return s;};
+ assert.throws(()=>applyMuck(hand(),0),/not allowed/,'not during betting');
+ // Seat 0 got called, so it shows first and can't muck.
+ assert.equal(firstShower(atShowdown(0)),0);
+ assert.throws(()=>applyMuck(atShowdown(0),0),/not allowed/,'the called player has to show');
+ assert.throws(()=>applyMuck(atShowdown(0),1),/not allowed/,'and the caller has to wait for that');
+ // Once seat 0 has shown, it's seat 1's choice.
+ const second=atShowdown(0);second.phase=12;
+ assert.equal(mayMuck(second),true);
+ const mucked=applyMuck(structuredClone(second),1);
+ assert.equal(mucked.phase,P_DONE);assert.equal(mucked.game.winner,0);
+ assert.throws(()=>applyMuck(structuredClone(second),0),/not allowed/,'seat 0 can’t muck on seat 1’s behalf');
+ // One card shown is too late.
+ const partial=structuredClone(second);partial.cursor=1;
+ assert.equal(mayMuck(partial),false);
+ assert.throws(()=>applyMuck(partial,1),/not allowed/);
+ // With no bet on the river, the first to act shows first, which is the player without the button.
+ const checked=hand();checked.game.stage=2;checked.game.actor=255;
+ assert.equal(firstShower(checked),1);
+ checked.game.button=1;
+ assert.equal(firstShower(checked),0);
+});
+test('betting sets who got called, and a new betting round clears it',()=>{
+ const deck=Array.from({length:52},()=>({a:'11'.repeat(32),b:'22'.repeat(32)}));
+ const s=acceptedHand({hand:1,keys:['33'.repeat(32),'44'.repeat(32)],deck,stacks:[1_000_000,1_000_000],bigBlind:20_000});
+ s.phase=P_BETTING;
+ assert.equal(s.aggressor,255,'blinds aren’t a bet');
+ applyAction(s,0,3,60_000);assert.equal(s.aggressor,0);
+ applyAction(s,1,3,180_000);assert.equal(s.aggressor,1,'the last raise counts');
+ applyAction(s,0,2,0);assert.equal(s.aggressor,1,'a call doesn’t change it');
+ assert.deepEqual(decodeHand(encodeHand(s)),s,'it survives encoding, because it’s part of what both sign');
 });

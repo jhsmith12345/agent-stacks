@@ -5,10 +5,19 @@ import {ChannelPeer} from '../src/channel/peer.js';
 import {ChannelRunner} from '../src/channel/runner.js';
 import {RelayTransport,startRelay} from '../src/channel/relay.js';
 import {sessionFromSeed} from '../src/channel/keys.js';
-import {accountBlob,channelAddress,channelTerms,CHANNEL_SPACE,COMPLETE,decodeChannel,ed25519Instruction,EXIT,OPEN,WAITING} from '../src/channel/chain.js';
+import {PublicKey} from '@solana/web3.js';
+import {accountBlob,ChannelChain,channelAddress,channelTerms,CHANNEL_SPACE,COMPLETE,decodeChannel,ED25519,ed25519Instruction,EXIT,OPEN,WAITING} from '../src/channel/chain.js';
 import {encodeHand,KIND_HAND,P_DONE,sha256,signedMessage} from '../src/channel/engine.js';
 import {fromHex,toHex} from '../src/channel/wire.js';
 import {signMessage} from '../src/channel/keys.js';
+import {acceptedManifest} from '../src/channel/manifest.js';
+import {privateDirectory} from '../src/private-files.js';
+import {acquireLock} from '../src/lock.js';
+import {spawnSync} from 'node:child_process';
+import {existsSync,mkdirSync,mkdtempSync,readdirSync,readFileSync,rmSync,unlinkSync as unlinkSync2,utimesSync,writeFileSync} from 'node:fs';
+import {uptime} from 'node:os';
+import {join} from 'node:path';
+import {tmpdir} from 'node:os';
 
 const sessions=[sessionFromSeed(Buffer.alloc(32,1)),sessionFromSeed(Buffer.alloc(32,2))];
 const config=()=>({program:'11111111111111111111111111111112',match:'11111111111111111111111111111113',terms:'aa'.repeat(32),programBytes:Buffer.alloc(32,3),matchBytes:Buffer.alloc(32,4),termsBytes:Buffer.alloc(32,0xaa),sessions:sessions.map(s=>toHex(s.publicKey)),buyIn:1_000_000,bigBlind:20_000,maxHands:1,turnSeconds:30});
@@ -47,7 +56,7 @@ function scriptedChain(state,time=1000){
  };
 }
 const silent={send:async()=>{},receive:async()=>[]};
-const runner=(p,chain,options={})=>new ChannelRunner({peer:p,chains:[chain],transport:silent,bufferKey:async()=>({publicKey:{toBase58:()=>'buffer'}}),stallMs:0,chainPollMs:0,...options});
+const runner=(p,chain,options={})=>new ChannelRunner({peer:p,chains:[chain],transport:silent,bufferKey:async()=>({publicKey:{toBase58:()=>'buffer'}}),stallMs:0,chainPollMs:0,disputePollMs:0,...options});
 const onChain=(p,overrides)=>({phase:OPEN,seq:0,window:0,deadline:0,version:1,blob:Buffer.alloc(0),...overrides});
 const latestHand=p=>fromHex(p.state.latest.payload);
 
@@ -179,7 +188,7 @@ test('a channel account decodes, and its hand state matches what the players sig
  const payload=encodeHand(s);
  payload.subarray(6,70).copy(b,137);
  [0,1,2,3,5,6,7,9,11].forEach((p,i)=>payload.subarray(70+i*64,134+i*64).copy(b,250+p*64));
- payload.subarray(646,735).copy(b,3586);payload.subarray(735,1311).copy(b,3675);
+ payload.subarray(646,735).copy(b,3586);payload.subarray(735,1311).copy(b,3675);b[4340]=payload[1311];
  assert.deepEqual(accountBlob(b),payload);
  b[8]=EXIT;
  assert.equal(accountBlob(b)[0],P_DONE,'a finished hand signs as done while the account is in its exit phase');
@@ -206,4 +215,139 @@ test('the terms hash changes with every term, and the match address with its non
   assert.notEqual(channelTerms({...base,...change}),hash,JSON.stringify(change));
  const [one]=await channelAddress(base.program,base.players[0],Buffer.alloc(32,1)),[two]=await channelAddress(base.program,base.players[0],Buffer.alloc(32,2));
  assert.notEqual(one.toBase58(),two.toBase58());
+});
+test('an agent keeps the terms it accepted, even if the file it was given is lost',async t=>{
+ const directory=mkdtempSync(join(tmpdir(),'stacks-manifest-'));t.after(()=>rmSync(directory,{recursive:true,force:true}));
+ privateDirectory(directory);
+ const creator='11111111111111111111111111111113',nonce='07'.repeat(32),program='11111111111111111111111111111112';
+ const [match]=await channelAddress(program,creator,Buffer.from(nonce,'hex'));
+ const manifest={program,players:[creator,'11111111111111111111111111111114'],genesis:'11111111111111111111111111111115',buyIn:1000,turnSeconds:3600,bigBlind:20,maxHands:2,sessions:sessions.map(s=>toHex(s.publicKey)),match:match.toBase58(),nonce};
+ manifest.terms=channelTerms(manifest);
+ const given=join(directory,'given.json'),state=join(directory,'state');mkdirSync(state,{mode:0o700});
+ // Nothing is accepted that doesn't check out.
+ writeFileSync(given,JSON.stringify({...manifest,buyIn:999}));
+ await assert.rejects(acceptedManifest(given,state),/terms hash/);
+ writeFileSync(given,JSON.stringify({...manifest,match:'11111111111111111111111111111116'}));
+ await assert.rejects(acceptedManifest(given,state),/match address/);
+ writeFileSync(given,'');
+ await assert.rejects(acceptedManifest(given,state),/Could not read/,'with no saved copy, a lost file is an error');
+ writeFileSync(given,JSON.stringify(manifest));
+ assert.equal((await acceptedManifest(given,state)).match,manifest.match);
+ // A power cut empties the file. The agent carries on from its own durable copy.
+ writeFileSync(given,'');
+ assert.equal((await acceptedManifest(given,state)).terms,manifest.terms);
+ rmSync(given);
+ assert.equal((await acceptedManifest(given,state)).terms,manifest.terms);
+ // And it won't mix this match's state with another match.
+ writeFileSync(given,JSON.stringify({...manifest,match:'11111111111111111111111111111116'}));
+ await assert.rejects(acceptedManifest(given,state),/different match/);
+});
+test('after a crash an agent takes over a dead lock by itself, and never a live one',t=>{
+ const directory=mkdtempSync(join(tmpdir(),'stacks-lock-'));t.after(()=>rmSync(directory,{recursive:true,force:true}));
+ const path=join(directory,'agent.lock'),options={reclaimDead:true};
+ const dead=spawnSync(process.execPath,['-e','']).pid;
+ // A process that's still running keeps its lock.
+ let release=acquireLock(directory,'agent.lock',options);
+ assert.throws(()=>acquireLock(directory,'agent.lock',options),/already locked/);
+ release();
+ assert.equal(existsSync(path),false);
+ writeFileSync(path,`${process.pid}\n`);
+ assert.throws(()=>acquireLock(directory,'agent.lock',options),/already locked/);
+ // Unreadable contents prove nothing, so it still refuses.
+ writeFileSync(path,'not a pid\n');
+ assert.throws(()=>acquireLock(directory,'agent.lock',options),/already locked/);
+ // A dead process's lock is taken over, and the new lock is this process's.
+ writeFileSync(path,`${dead}\n`);
+ release=acquireLock(directory,'agent.lock',options);
+ assert.equal(readFileSync(path,'utf8').split('\n')[0],String(process.pid));
+ assert.deepEqual(readdirSync(directory),['agent.lock'],'nothing is left behind');
+ release();
+ // An empty lock from before this boot is what a power cut leaves. One from this boot may be starting up.
+ writeFileSync(path,'');
+ const beforeBoot=new Date(Date.now()-uptime()*1000-60_000);
+ assert.throws(()=>acquireLock(directory,'agent.lock',options),/already locked/,'it might be a process starting right now');
+ utimesSync(path,beforeBoot,beforeBoot);
+ release=acquireLock(directory,'agent.lock',options);
+ assert.equal(readFileSync(path,'utf8').split('\n')[0],String(process.pid));
+ release();
+ // A lock from another boot is stale, even if its PID now belongs to something running.
+ writeFileSync(path,`${process.pid}\nsome-other-boot\n`);
+ if(existsSync('/proc/sys/kernel/random/boot_id')){release=acquireLock(directory,'agent.lock',options);release();}
+ else assert.throws(()=>acquireLock(directory,'agent.lock',options),/already locked/,'without boot IDs it stays cautious');
+ unlinkSync2(path);
+ // Older tools keep refusing, and need a person to look.
+ writeFileSync(path,`${dead}\n`);
+ assert.throws(()=>acquireLock(directory,'agent.lock'),/already locked/);
+});
+test('an agent paces its chain reads, even in a long dispute',{timeout:60000},async()=>{
+ const [stateA]=inPlay(),a=peer(0,stateA);a.markDisputed();
+ const chain=scriptedChain(onChain(a,{phase:EXIT,seq:a.state.latest.seq,window:9000,deadline:9000}));
+ let reads=0;const read=chain.read.bind(chain);chain.read=async()=>{reads++;return read();};
+ const r=runner(a,chain,{chainPollMs:15_000,disputePollMs:5_000});
+ for(let i=0;i<20;i++)await r.tick();
+ assert.equal(reads,1,'twenty ticks in quick succession read the chain once');
+ r.chainAt=Date.now()-5_001;
+ await r.tick();
+ assert.equal(reads,2,'and it looks again after the dispute interval');
+});
+test('an agent carries on when the opponent posts its own signed move and then plays on',{timeout:60000},async()=>{
+ const [stateA,stateB]=inPlay(),a=peer(0,stateA),b=peer(1,stateB);
+ // Seat 0 signed a move and the acknowledgement never came. Seat 1 posted it, then moved on chain.
+ const seat0=a.chainMove(a.state.latest.seq),posted=seat0.seq;
+ b.acceptChainMove(posted,seat0.step,seat0.signature);
+ const reply=b.chainMove(posted);
+ const chain=scriptedChain(onChain(a,{phase:8,seq:reply.seq,window:100,deadline:5000,blob:encodeHand(b.state.s)}));
+ // Only the later move is a move transaction. The posted state never shows up as one.
+ chain.moves=new Map([[reply.seq,{seq:reply.seq,step:reply.step,signature:reply.signature}]]);
+ await runner(a,chain).tick();
+ assert.equal(a.state.latest.seq,reply.seq,'it caught up instead of waiting forever');
+});
+test('a relay that silently hangs can’t hold up the chain checks',{timeout:20000},async()=>{
+ const [stateA]=inPlay(),a=peer(0,stateA);
+ const never=new Promise(()=>{});
+ const hanging={send:()=>never,receive:()=>never};
+ const chain=scriptedChain(onChain(a,{phase:EXIT,seq:1,window:2000,deadline:2000}));
+ const r=runner(a,chain,{transport:hanging,resendMs:0});
+ const started=Date.now();
+ await r.tick();
+ assert.ok(Date.now()-started<2000,'the tick finished without waiting on the relay');
+ assert.equal(chain.calls[0]?.type,'post','and it answered the stale post');
+ await r.send([{type:'one'},{type:'two'}]);
+ for(let i=0;i<100;i++)await r.send([{type:'filler'}]);
+ assert.ok(r.outgoing.length<=64,'the send queue stays bounded');
+});
+test('messages that arrive through the relay are handled on the next pass',{timeout:60000},async()=>{
+ const [stateA,stateB]=inPlay(),b=peer(1,stateB),sent=[];
+ const a=peer(0,stateA),move=a.state.outbox.find(m=>m.type==='move');
+ const delivered=[move];
+ const r=runner(b,scriptedChain(onChain(b,{phase:OPEN})),{stallMs:1e9,chainPollMs:1e9,disputePollMs:1e9,transport:{send:async m=>sent.push(m),receive:async()=>delivered.splice(0)}});
+ await r.tick();await new Promise(done=>setImmediate(done));await r.tick();await r.sending;
+ assert.equal(b.state.latest.seq,move.seq);
+ assert.ok(sent.some(m=>m.type==='ack'&&m.seq===move.seq));
+});
+test('catching up fetches only what’s new, because a slow fetch can cost a deadline',async()=>{
+ const program='11111111111111111111111111111112';
+ const session=sessions[0];
+ let fetched=0;
+ const entry=(seq,tag=39)=>{
+  const signature=Buffer.alloc(64,seq),signed=ed25519Instruction([{publicKey:session.publicKey,signature,message:Buffer.alloc(32,1)}]);
+  const data=Buffer.concat([Buffer.from([tag]),(()=>{const b=Buffer.alloc(8);b.writeBigUInt64LE(BigInt(seq-1));return b;})(),Buffer.from([1]),Buffer.alloc(8)]);
+  return {signature:`sig-${seq}`,tx:{transaction:{message:{accountKeys:[new PublicKey(program),ED25519],instructions:[{programIdIndex:1,accounts:[],data:Buffer.from(signed.data)},{programIdIndex:0,accounts:[],data}]}}}};
+ };
+ let history=[entry(4),entry(3),entry(2),entry(1)];
+ const connection={
+  getSignaturesForAddress:async()=>history.map(e=>({signature:e.signature,err:null})),
+  getTransaction:async signature=>{fetched++;return history.find(e=>e.signature===signature)?.tx??null;},
+ };
+ const chain=new ChannelChain({connection,program:new PublicKey(program),wallet:{publicKey:new PublicKey(program)}},config());
+ let moves=await chain.onChainMoves(2);
+ assert.deepEqual([...moves.keys()],[4,3]);
+ assert.equal(fetched,3,'it stopped at the first move it already knew, not at the start of the match');
+ assert.equal(moves.get(4).step.action,1);assert.deepEqual(moves.get(4).signature,Buffer.alloc(64,4));
+ fetched=0;moves=await chain.onChainMoves(2);
+ assert.equal(fetched,0,'and doesn’t fetch those again');
+ history=[entry(6,45),entry(5),...history];
+ moves=await chain.onChainMoves(4);
+ assert.deepEqual([...moves.keys()],[6,5]);assert.deepEqual(moves.get(6).step,{muck:true});
+ assert.equal(fetched,2,'only the two new ones');
 });

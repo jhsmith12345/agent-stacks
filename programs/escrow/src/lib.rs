@@ -139,13 +139,13 @@ pub fn process_instruction(
     instruction: &[u8],
 ) -> ProgramResult {
     let (&tag, args) = instruction.split_first().ok_or_else(fail)?;
-    check((30..=44).contains(&tag))?;
+    check((30..=45).contains(&tag))?;
     channel::process(program, accounts, tag, args)
 }
 // Tags: 0 verify DLEQ, 1 create, 2 join, 3 register key, 4 cooperative
 // settlement, 5 permissionless obligation timeout, 6 cancel invitation, 7 close,
 // 8–12 proof-account lifecycle, 13 consume verified shuffle, 14 card share, 15 action,
-// 16–19 joint shuffle buffers, 20 claim a deferred payout, 30–44 channel matches (see channel.rs).
+// 16–19 joint shuffle buffers, 20 claim a deferred payout, 30–45 channel matches (see channel.rs).
 #[cfg(not(feature = "channel-only"))]
 pub fn process_instruction(
     program: &Pubkey,
@@ -157,7 +157,7 @@ pub fn process_instruction(
         proof::verify(args, None)?;
         return Ok(());
     }
-    if (30..=44).contains(&tag) {
+    if (30..=45).contains(&tag) {
         return channel::process(program, accounts, tag, args);
     }
     let mut it = accounts.iter();
@@ -404,7 +404,7 @@ pub fn process_instruction(
             let b = next_account_info(&mut it)?;
             check(*a.key == key_at(&state, 17) && *b.key == key_at(&state, 49))?;
             if tag == 14 {
-                play::share(program, vault.key, &mut state, seat, args)?;
+                play::share(program, vault.key, &mut state, seat, args, 0)?;
             } else {
                 check(args.len() == 17 && state[8] == play::BETTING)?;
                 let mut g = play::read(&state)?;

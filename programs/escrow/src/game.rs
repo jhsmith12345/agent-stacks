@@ -185,6 +185,12 @@ impl Game {
     pub fn forfeit(&mut self, loser: u8) {
         self.award(Some(1 - loser), 2);
     }
+    /// A player second to show gives up the pot, and their cards are never revealed.
+    pub fn muck(&mut self, loser: u8) -> Result<(), ProgramError> {
+        ensure(self.stage == SHOWDOWN && loser < 2)?;
+        self.award(Some(1 - loser), 3);
+        Ok(())
+    }
     pub fn resume_board(&mut self) -> Result<(), ProgramError> {
         ensure(self.stage == BOARD && (1..=3).contains(&self.street))?;
         let required = if self.street == 1 {

@@ -26,12 +26,13 @@ pub const MAGIC: &[u8; 8] = b"ASTKCHN1";
 pub const SESSIONS: usize = play::SPACE;
 pub const SEQ: usize = SESSIONS + 64;
 pub const WINDOW: usize = SEQ + 8;
-pub const SPACE: usize = WINDOW + 8;
+pub const AGGRESSOR: usize = WINDOW + 8;
+pub const SPACE: usize = AGGRESSOR + 1;
 pub const WAITING: u8 = 0;
 pub const COMPLETE: u8 = 6;
 pub const OPEN: u8 = 20;
 pub const EXIT: u8 = 21;
-pub const BLOB: usize = 1311;
+pub const BLOB: usize = 1312;
 pub const KIND_STACKS: u8 = 1;
 pub const KIND_CLOSE: u8 = 2;
 pub const KIND_HAND: u8 = 3;
@@ -126,6 +127,7 @@ pub fn blob(state: &[u8]) -> Vec<u8> {
     }
     out.extend_from_slice(&state[play::GAME_OFFSET..play::SHARES_OFFSET]);
     out.extend_from_slice(&state[play::SHARES_OFFSET..play::CURSOR]);
+    out.push(state[AGGRESSOR]);
     out
 }
 /// The runtime verifies an Ed25519 instruction itself, or the whole transaction fails. This confirms
@@ -165,6 +167,22 @@ fn require_signed(sysvar: &AccountInfo, expected: &[([u8; 32], [u8; 32])]) -> Pr
         &instruction.data,
         expected,
     ))
+}
+/// Who shows first: the player who got called, meaning the last to bet or raise in the final betting
+/// round. If nobody bet on it, the first to act on it. The other player may then muck.
+fn first_shower(state: &[u8], g: &game::Game) -> usize {
+    if state[AGGRESSOR] < 2 {
+        state[AGGRESSOR] as usize
+    } else {
+        1 - g.button as usize
+    }
+}
+fn show_phase(seat: usize) -> u8 {
+    if seat == 0 {
+        play::SHOW_A
+    } else {
+        play::SHOW_B
+    }
 }
 fn settled_game(stacks: [u64; 2], big_blind: u64) -> game::Game {
     game::Game {
@@ -290,6 +308,7 @@ fn create<'a, 'b>(
     state[play::MAX_HANDS..play::SPACE].copy_from_slice(&max_hands.to_le_bytes());
     state[play::BLIND_OFFSET..play::GAME_OFFSET].copy_from_slice(&big_blind.to_le_bytes());
     state[SESSIONS..SESSIONS + 64].copy_from_slice(&args[88..152]);
+    state[AGGRESSOR] = game::NONE;
     play::write(&mut state, &settled_game([buy_in; 2], big_blind));
     save(vault, &mut state)
 }
@@ -354,7 +373,9 @@ fn load_hand(state: &mut [u8], payload: &[u8]) -> Result<bool, ProgramError> {
             .copy_from_slice(&payload[70 + i * 64..134 + i * 64]);
     }
     state[play::GAME_OFFSET..play::SHARES_OFFSET].copy_from_slice(&payload[646..735]);
-    state[play::SHARES_OFFSET..play::CURSOR].copy_from_slice(&payload[735..BLOB]);
+    state[play::SHARES_OFFSET..play::CURSOR].copy_from_slice(&payload[735..1311]);
+    check(payload[1311] < 2 || payload[1311] == game::NONE)?;
+    state[AGGRESSOR] = payload[1311];
     let g = play::read(state)?;
     check(g.big_blind == u64_at(state, play::BLIND_OFFSET))?;
     let total = g.stacks[0]
@@ -511,7 +532,7 @@ pub fn process(program: &Pubkey, accounts: &[AccountInfo], tag: u8, args: &[u8])
             state[SEQ..SEQ + 8].copy_from_slice(&seq.to_le_bytes());
             open_window(&mut state, now, exit)?;
         }
-        39 | 40 => {
+        39 | 40 | 45 => {
             check(args.len() >= 8 && u64_at(args, 0) == u64_at(&state, SEQ))?;
             check(now >= i64_at(&state, WINDOW) && now < i64_at(&state, 97))?;
             let seat = play::actor(&state)?;
@@ -519,15 +540,40 @@ pub fn process(program: &Pubkey, accounts: &[AccountInfo], tag: u8, args: &[u8])
             let sysvar = next_account_info(&mut it)?;
             signer(actor)?;
             check(player_seat(&state, actor.key) == Some(seat))?;
+            let phase_before = state[8];
+            let first = first_shower(&state, &play::read(&state)?);
             if tag == 40 {
-                play::share(program, vault.key, &mut state, seat, args)?;
+                play::share(program, vault.key, &mut state, seat, args, first)?;
+                // A new betting round starts the question of who got called over again. With a player
+                // all in, no betting round follows, so the last bet still stands.
+                if phase_before == play::BOARD_B
+                    && state[8] != play::BOARD_B
+                    && play::read(&state)?.stage == game::BETTING
+                {
+                    state[AGGRESSOR] = game::NONE;
+                }
+            } else if tag == 45 {
+                // Only the second to show may muck, and only before revealing either card. The
+                // player who got called has to show, or lose the pot by missing the deadline.
+                check(args.len() == 8 && state[8] == show_phase(1 - first))?;
+                check(state[play::CURSOR] == 0)?;
+                let mut g = play::read(&state)?;
+                g.muck(seat as u8)?;
+                play::sync(&mut state, &g)?;
             } else {
                 check(args.len() == 17 && state[8] == play::BETTING)?;
                 let mut g = play::read(&state)?;
+                let bet_before = g.current_bet;
                 g.act(seat as u8, args[8], u64_at(args, 9))?;
                 let total = g.stacks[0] + g.stacks[1] + g.contributed[0] + g.contributed[1];
                 check(total == buy_in * 2)?;
+                if g.current_bet > bet_before {
+                    state[AGGRESSOR] = seat as u8;
+                }
                 play::sync(&mut state, &g)?;
+            }
+            if state[8] == play::SHOW_A && ![play::SHOW_A, play::SHOW_B].contains(&phase_before) {
+                state[8] = show_phase(first_shower(&state, &play::read(&state)?));
             }
             // The mover signs the state this produced, so its on-chain move binds it exactly as an
             // off-chain one would. An opponent can verify that without trusting whoever relayed it.

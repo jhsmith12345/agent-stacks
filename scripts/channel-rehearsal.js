@@ -111,7 +111,7 @@ const SCENARIOS={
    assert(state.payouts[0]+state.payouts[1]===2*m.manifest.buyIn,'payouts add up');
    const moves=[a,b].flatMap(x=>x.err.split('\n').filter(l=>l.includes('on-chain move'))).length;
    assert(moves>0,'moves really happened on chain');
-   return {seconds:Math.round((Date.now()-started)/1000),onChainMoves:moves,matchTransactions:count,payouts:state.payouts,finalStep:state.seq,walletChanges:await delta(m)};
+   return {seconds:Math.round((Date.now()-started)/1000),onChainMoves:moves,matchTransactions:count,payouts:state.payouts,finalStep:state.seq,settledBy:['fold','showdown','timeout','muck'][state.game.reason],walletChanges:await delta(m)};
   }finally{stop(a,b);relay.close();}
  },
  // A player posts an old state hoping the other is asleep. The other's newest state must win.

@@ -1,6 +1,6 @@
 # Channel design: off-chain play, on-chain court
 
-**Status: built and played on a local validator and public devnet, experimental, test funds only, not independently reviewed.** This replaces "each player runs a validating node" as the plan for safe play with friends and strangers. Results are in the [testing report](testing.md).
+**Status: built and played on a local validator, on public devnet and between two VMs, experimental, test funds only, not independently reviewed. Showing and mucking haven't run on public devnet yet.** This replaces "each player runs a validating node" as the plan for safe play with friends and strangers. Results are in the [testing report](testing.md).
 
 ## The idea
 
@@ -29,7 +29,7 @@ These assumptions remain:
 Each player has a wallet and a session key.
 
 - **Wallet:** signs only the create or join transaction, and is where payouts go.
-- **Session key:** held by the agent. It signs game states and pays dispute fees from a small balance. It can't move a deposit anywhere except by the match's rules.
+- **Session key:** held by the agent. It signs game states and pays dispute fees from a small balance. It can't move a deposit anywhere except by the match's rules. At today's rent, about 0.0089 SOL covers a dispute where it posts a state, and about 0.0011 SOL one where it only moves. Any account holding SOL has to keep the 0.0009 SOL rent minimum, so that's included.
 
 The joiner sends a session key to the creator in an offer signed by its wallet. The creator writes both session keys and the stakes into the account. The contract computes the terms hash from what it actually stores, and the joiner's transaction must carry the same hash, computed from the terms it accepted. If a creator stored anything else, such as its own key in the joiner's seat or a bigger stake, the join fails. So neither player has to read the terms back from an RPC.
 
@@ -59,6 +59,12 @@ This stops two attacks an earlier sketch allowed:
 - **Fork:** a player signs one move off-chain and sends a different one on chain. The co-signed state beats it during the window, and the two signatures together forfeit the match afterwards.
 
 **Signed on-chain moves.** After the window, each on-chain move must carry the mover's signature on the resulting state, and the contract checks it. So everything an opponent does on chain is also a binding signature. An agent validates that signature and the step against its local engine before acting, so a lying RPC can't invent an obligation. If an opponent signs a move the RPC only pretends landed, and then does something else on chain, the signatures prove it and they forfeit.
+
+**Showing and mucking.** At showdown the player who got called shows first, meaning the last to bet or raise in the final betting round. An all-in that gets called counts, even though the rest of the board runs out afterwards. If nobody bet on the final round, the first to act on it shows first.
+
+The other player then sees those cards and chooses. Showing compares the hands, and a tie splits the pot. Mucking gives up the pot, and their cards stay hidden for good, because the share that would decrypt them is never released. Only the second player can muck, and only before showing either card. By default an agent shows a hand that wins or ties and mucks one that loses, and its owner can override that with a `reveal` function.
+
+The contract can't force anyone to reveal a card, because only that player holds the secret. So a called player who refuses to show keeps its cards hidden, but loses the pot when the deadline passes, and the match ends. The rule is enforced through the money rather than literally.
 
 **Timeout means fold.** A player who misses a deadline during a hand loses that pot, and the match settles. This replaces the older whole-match forfeit. Stalling gains nothing a fold wouldn't give, and a dropped connection doesn't cost a player's whole stake. It needs review, because the incentive argument is new.
 
@@ -95,7 +101,7 @@ sha256("agent-stacks/channel/v1" || program || match || terms || kind(u8) || seq
 | --- | --- | --- |
 | 1 | Stacks | `hand(u32) stack0(u64) stack1(u64)` |
 | 2 | Close | `stack0(u64) stack1(u64)` |
-| 3 | Hand | The 1,311-byte hand state below |
+| 3 | Hand | The 1,312-byte hand state below |
 
 **Hand state.** Only the nine cards that can ever be revealed are included. The other 43 are checked off-chain and never matter on chain.
 
@@ -108,6 +114,7 @@ sha256("agent-stacks/channel/v1" || program || match || terms || kind(u8) || seq
 | 70 | 576 | Cards at physical positions 0, 1, 2, 3, 5, 6, 7, 9, 11 |
 | 646 | 89 | Game, encoded as `game.rs` does |
 | 735 | 576 | Card shares, two per card |
+| 1311 | 1 | Who got called: a seat, or 255 if nobody has bet |
 
 Phases and share contexts are the ones the program already uses, so a share made off-chain can be replayed on chain unchanged.
 
@@ -120,6 +127,7 @@ Channel accounts use their own address seed and magic bytes, so the existing ins
 | 4260 | 64 | Both session keys |
 | 4324 | 8 | Sequence number |
 | 4332 | 8 | End of the challenge window |
+| 4340 | 1 | Who got called |
 
 | Tag | Name | Who | Effect |
 | --- | --- | --- | --- |
@@ -136,6 +144,7 @@ Channel accounts use their own address seed and magic bytes, so the existing ins
 | 42 | Equivocation | Anyone | Two signatures from one player at one sequence number forfeit the escrow to the other player |
 | 43 | Claim | Player | Collect a payout that couldn't be delivered |
 | 44 | Retire | Creator wallet | Reclaim rent, leave a tombstone |
+| 45 | Muck | Second player to show | Give up the pot without showing, after the window, with a signature on the result |
 
 Signatures are checked through Solana's Ed25519 program. The contract reads the instruction just before its own and requires:
 
@@ -159,6 +168,7 @@ More than two players isn't covered. Channels get much harder with more seats.
 - **Restoring old state is dangerous.** An agent restored from an old backup mid-match could sign a second state at some step, and lose its whole stake.
 - **After a missed window, an agent may not be able to continue.** If it has to fall back to an older state and would decide differently at some step, it refuses to sign, and then times out. That loses the pot rather than risking the stake.
 - **A relay can read betting and revealed shares.** Nothing a relay sees can decrypt a hidden card, but it does see the betting.
+- **A short clock can lose to a slow connection.** On the rate-limited public RPC, a 45-second clock was too short for an agent to catch up and reply on chain. Use a clock of at least several minutes, and longer for players who may drop offline.
 
 ## Running it
 
@@ -172,4 +182,4 @@ npm run channel:relay -- 8787
 
 `scripts/channel.js` sets up a match: a `session` key for each player, an `offer` from the joiner, then `create` and `join`. Each player then runs `examples/channel-agent.js` with their session key, the manifest, the relay and one or more RPC URLs. `sweep` returns what's left in a session key, and `retire` reclaims the match's rent. Set `AGENT_STACKS_ALLOW_LOCAL=1` for a local validator.
 
-`scripts/channel-rehearsal.js` plays real matches with real agent processes against a validator, and runs the attacks below.
+`scripts/channel-rehearsal.js` plays real matches with real agent processes against a validator, and runs the attacks below. `scripts/channel-vm-rehearsal.js` plays matches between two Lima VMs on public devnet, with crash, power-cut and network faults.

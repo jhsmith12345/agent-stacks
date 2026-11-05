@@ -5,8 +5,8 @@ import {getBase58Encoder} from '@solana/kit';
 import {u32,u64} from '../solana/client.js';
 import {decodeGame,decodeHand,encodeGame,BLOB_BYTES,KIND_CLOSE,KIND_HAND,KIND_STACKS} from './engine.js';
 import {fromHex,toHex} from './wire.js';
-export const CHANNEL_SPACE=4340,BUFFER_SPACE=76+BLOB_BYTES,OPEN=20,EXIT=21,WAITING=0,COMPLETE=6;
-const SESSIONS=4260,SEQ=SESSIONS+64,WINDOW=SEQ+8,CURSOR=4251,HAND=4252,GAME=3586,SHARES=3675,DECK=250;
+export const CHANNEL_SPACE=4341,BUFFER_SPACE=76+BLOB_BYTES,OPEN=20,EXIT=21,WAITING=0,COMPLETE=6;
+const SESSIONS=4260,SEQ=SESSIONS+64,WINDOW=SEQ+8,AGGRESSOR=WINDOW+8,CURSOR=4251,HAND=4252,GAME=3586,SHARES=3675,DECK=250;
 const PHYSICAL=[0,1,2,3,5,6,7,9,11];
 export const ED25519=new PublicKey('Ed25519SigVerify111111111111111111111111111');
 export const INSTRUCTIONS=new PublicKey('Sysvar1nstructions1111111111111111111111111');
@@ -29,7 +29,7 @@ export function decodeChannel(b){
 export function accountBlob(b){
  const out=Buffer.alloc(BLOB_BYTES);out[0]=b[8]===EXIT?COMPLETE:b[8];out[1]=b[CURSOR];b.copy(out,2,HAND,HAND+4);b.copy(out,6,137,201);
  PHYSICAL.forEach((p,i)=>b.copy(out,70+i*64,DECK+p*64,DECK+p*64+64));
- b.copy(out,646,GAME,GAME+89);b.copy(out,735,SHARES,SHARES+576);
+ b.copy(out,646,GAME,GAME+89);b.copy(out,735,SHARES,SHARES+576);out[1311]=b[AGGRESSOR];
  return out;
 }
 export function ed25519Instruction(entries){
@@ -102,8 +102,8 @@ export class ChannelChain{
  async move(seat,chainSeq,step,message,signature){
   const signed=ed25519Instruction([{publicKey:this.keys[seat],signature,message}]);
   const accounts=[meta(this.match,false,true),meta(this.me,true),meta(INSTRUCTIONS)];
-  const args=step.logical!==undefined?[u64(chainSeq),Buffer.from([step.logical]),fromHex(step.wire)]:[u64(chainSeq),Buffer.from([step.action]),u64(step.amount??0)];
-  return this.client.send([signed,this.ix(step.logical!==undefined?40:39,args,accounts)],[],UNITS);
+  const [tag,args]=step.muck===true?[45,[u64(chainSeq)]]:step.logical!==undefined?[40,[u64(chainSeq),Buffer.from([step.logical]),fromHex(step.wire)]]:[39,[u64(chainSeq),Buffer.from([step.action]),u64(step.amount??0)]];
+  return this.client.send([signed,this.ix(tag,args,accounts)],[],UNITS);
  }
  async timeout(){return this.client.send([this.ix(41,[],[meta(this.match,false,true),...this.wallets()])],[],UNITS);}
  async proveFork(evidence,firstMessage,secondMessage){
@@ -113,27 +113,40 @@ export class ChannelChain{
  }
  // The moves an opponent made on chain, from public transactions. Nothing here is believed yet: the
  // agent verifies each signature against its own engine before it acts on any of them.
+ // History comes newest first, and a transaction never changes, so only what's new is fetched. On a
+ // rate-limited RPC, fetching the whole history every time could take longer than a move's clock.
  async onChainMoves(afterSeq){
   const moves=new Map(),signatures=await this.client.connection.getSignaturesForAddress(this.match,{limit:200},'confirmed');
+  this.fetched??=new Map();
   for(const item of signatures){
    if(item.err)continue;
-   const tx=await this.client.connection.getTransaction(item.signature,{commitment:'confirmed',maxSupportedTransactionVersion:0});
-   const message=tx?.transaction?.message;if(!message)continue;
-   const keys=(message.accountKeys??message.staticAccountKeys).map(k=>k.toString());
-   const instructions=message.instructions??message.compiledInstructions;
-   instructions.forEach((ix,i)=>{
-    if(keys[ix.programIdIndex]!==this.client.program.toBase58())return;
-    const data=typeof ix.data==='string'?Buffer.from(getBase58Encoder().encode(ix.data)):Buffer.from(ix.data);
-    if(![39,40].includes(data[0])||data.length<9||i===0)return;
-    const seq=Number(data.readBigUInt64LE(1))+1;if(seq<=afterSeq)return;
-    const before=instructions[i-1],signedData=typeof before.data==='string'?Buffer.from(getBase58Encoder().encode(before.data)):Buffer.from(before.data);
-    if(keys[before.programIdIndex]!==ED25519.toBase58()||signedData.length<16)return;
-    const signature=signedData.subarray(signedData.readUInt16LE(2),signedData.readUInt16LE(2)+64);
-    const step=data[0]===39?{action:data[9],amount:Number(data.readBigUInt64LE(10))}:{logical:data[9],wire:toHex(data.subarray(10))};
-    if(!moves.has(seq))moves.set(seq,{seq,step,signature:Buffer.from(signature)});
-   });
+   let found=this.fetched.get(item.signature);
+   if(!found){
+    const tx=await this.client.connection.getTransaction(item.signature,{commitment:'confirmed',maxSupportedTransactionVersion:0});
+    if(!tx?.transaction?.message)continue;
+    found=this.movesIn(tx);this.fetched.set(item.signature,found);
+   }
+   for(const move of found)if(move.seq>afterSeq&&!moves.has(move.seq))moves.set(move.seq,move);
+   if(found.some(move=>move.seq<=afterSeq))break;
   }
   return moves;
+ }
+ movesIn(tx){
+  const message=tx.transaction.message,found=[];
+  const keys=(message.accountKeys??message.staticAccountKeys).map(k=>k.toString());
+  const instructions=message.instructions??message.compiledInstructions;
+  const bytes=ix=>typeof ix.data==='string'?Buffer.from(getBase58Encoder().encode(ix.data)):Buffer.from(ix.data);
+  instructions.forEach((ix,i)=>{
+   if(keys[ix.programIdIndex]!==this.client.program.toBase58())return;
+   const data=bytes(ix);
+   if(![39,40,45].includes(data[0])||data.length<9||i===0)return;
+   const before=instructions[i-1],signedData=bytes(before);
+   if(keys[before.programIdIndex]!==ED25519.toBase58()||signedData.length<16)return;
+   const signature=signedData.subarray(signedData.readUInt16LE(2),signedData.readUInt16LE(2)+64);
+   const step=data[0]===45?{muck:true}:data[0]===39?{action:data[9],amount:Number(data.readBigUInt64LE(10))}:{logical:data[9],wire:toHex(data.subarray(10))};
+   found.push({seq:Number(data.readBigUInt64LE(1))+1,step,signature:Buffer.from(signature)});
+  });
+  return found;
  }
 }
 export {decodeHand,encodeGame,KIND_CLOSE,KIND_HAND,KIND_STACKS};

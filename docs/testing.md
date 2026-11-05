@@ -2,7 +2,9 @@
 
 ## Channel matches
 
-These test the [channel design](channel-design.md), where agents play through signed messages and the contract only settles disputes. Each player's agent runs as its own process, and they share only a manifest and a relay. Everything below uses test funds, ran on one Mac, and hasn't been independently reviewed.
+These test the [channel design](channel-design.md), where agents play through signed messages and the contract only settles disputes. Each player's agent runs as its own process, and they share only a manifest and a relay. Everything below uses test funds, ran on one Mac (some of it in two VMs), and hasn't been independently reviewed.
+
+The current channel-only build is `9ccfb8c5ab7684d4c23f489b26d4f30a399e55069a1520e6862ce399887f25b1`, 180,744 bytes. Showing and mucking changed the state format, so the program deployed for the runs below can't play those rules. Deploying the new build takes about 0.92 test SOL.
 
 ### Public devnet, 2026-11-05
 
@@ -15,6 +17,20 @@ Program `GQkM4Uo4hPx8qL4UqkaoA8CZDUGR9GgvZxBaN46UNEGd`, the channel-only build. 
 
 After retiring the match and sweeping session keys, each run's net cost was about 0.0008 SOL, nearly all of it the permanent tombstone on the match address.
 
+### Two VMs, public devnet, 2026-11-05
+
+`scripts/channel-vm-rehearsal.js` plays between two Lima VMs running Alpine Linux, each with its own kernel, disk and keys, and no shared folders. Each VM generated its own keys, and only the offer and manifest crossed between them. The relay ran on the host, and all 36 channel tests that existed then also passed inside a VM. This used the deployed build above, so it predates showing and mucking.
+
+| Drill | What happens | Result |
+| --- | --- | --- |
+| Clean, 2 hands | Nothing goes wrong | 67 seconds, 3 transactions |
+| Crash | `kill -9` of B's agent mid-hand, then a restart | 61 seconds, 3 transactions, no dispute |
+| Power cut | B's VM is forced off mid-hand and boots again 33 seconds later | 92 seconds, 3 transactions, no dispute. B's manifest was 0 bytes afterwards, and it carried on from its durable copy |
+| Network cut | B's firewall drops the relay's packets, on a 45-second clock | Both agents went to the chain: 9 moves, 13 transactions. B then lost the pot on the clock, because catching up took too long. Fixed since, and not rerun on devnet |
+| Gone for good | B's VM is forced off and stays off, on a 30-second clock | A is paid 127 seconds later, and B loses 10,000 of 1,000,000 lamports |
+
+Two earlier power-cut runs also played out the long way: each agent waited out a full one-hour challenge window, then finished the hand on chain with 24 moves, settling at state 27.
+
 ### Local validator, with devnet's feature set
 
 `scripts/channel-rehearsal.js` runs these against the channel-only build. Rent and slot time stay at local defaults.
@@ -23,7 +39,7 @@ After retiring the match and sweeping session keys, each run's net cost was abou
 | --- | --- | --- |
 | Clean | 2 hands | 33 seconds, 3 transactions on the match |
 | Vanish | One agent is killed mid-hand, on a 30-second clock | The other is paid 82 seconds later; only the pot changes hands |
-| On-chain | The relay dies, and both agents stay up | They finish the hand with 22 verified on-chain moves, 28 transactions |
+| On-chain | The relay dies, and both agents stay up | They finish the hand with about 22 verified on-chain moves, 28 or 29 transactions. It has ended both ways: in a muck, and in a split pot at showdown |
 | Stale | A player posts its old state 1 | The other answers with state 4 and wins the dispute |
 | Fork | A player signs two states at one step | The forger forfeits the whole escrow |
 | Lying RPC | The audit's card-leak attack (AS-03): the RPC says showdown is due | No hole-card share is released, and no transaction is broadcast |
@@ -33,16 +49,16 @@ The older path needed 57 minutes and about 2,900 transactions for 2 hands in its
 ### Automated checks
 
 - **Engine against contract:** 600 random betting games and 3,000 hand rankings match byte for byte, including illegal moves. A whole hand with real keys, shuffles and proofs matches at every step in the SBF VM.
-- **Tests:** 26 for the contract in the VM, also run against the channel-only build. 36 for the agent and its dispute decisions.
-- **Compute:** at most 101,670 units for a share move and 7,098 for a betting move.
+- **Tests:** 35 for the contract in the VM, also run against the channel-only build. 49 for the agent and its dispute decisions.
+- **Compute:** at most 97,988 units for a share move and 7,069 for a betting move.
 
 Mutation checks break one rule at a time in a scratch copy and confirm a test fails. These aren't in CI, and the scripts stayed in a scratch directory.
 
 | Area | Caught | Not caught, and why |
 | --- | --- | --- |
-| Contract | 54 of 55 | Claiming a held payout twice: the Solana runtime separately refuses to take an account below its rent minimum |
-| Agent | 21 of 22 | Co-signing with its own move pending: the one-signature-per-step rule also stops it |
-| Dispute decisions | 11 of 11 | |
+| Contract | 65 of 67 | Claiming a held payout twice: the Solana runtime separately refuses to take an account below its rent minimum. Mucking before showdown: the contract's phase check also stops it |
+| Agent | 31 of 32 | Co-signing with its own move pending: the one-signature-per-step rule also stops it |
+| Dispute decisions | 16 of 16 | |
 
 The first mutation runs caught only about half: 32 of 48 in the contract and 11 of 22 in the agent. Most misses were tests failing for the wrong reason. The rollback test, for example, used bad signatures, so it passed even with the window rule removed. Those tests were rewritten.
 
@@ -56,9 +72,19 @@ The first mutation runs caught only about half: 32 of 48 in the contract and 11 
 - **Junk from a relay could fill the agent's queue for early messages** and crowd out real ones. It now drops the oldest first.
 - **A rejected simulation crashed while formatting its error,** which hid the real reason. This was in the existing client.
 
+The VM drills then found these, none of which showed up with both agents on one machine:
+
+- **An agent could get stuck on its own move (serious).** If it signed a move, the opponent posted that move and then played on, the agent waited forever to see it as a move transaction, and lost on the clock.
+- **A silent relay held up the chain checks (serious).** A firewall that drops packets makes each relay request hang until it times out, and the agent checked the chain only between requests. Relay traffic now runs separately.
+- **Re-reading the match's history took longer than a short clock.** On a rate-limited RPC, fetching every transaction on each check cost a pot. It now fetches only what's new.
+- **Agents read the chain many times a second during a dispute,** which got a shared address rate limited. Reads are now paced.
+- **A power cut emptied the manifest and the lock file.** The agent now keeps a durable copy of the terms, flushes its lock to disk, and takes over a lock only when its holder is provably gone.
+- **A session key without enough SOL couldn't post a state, so it couldn't defend its player.** Setup now refuses a reserve too small for that, unless overridden.
+
 ### What this doesn't show
 
-- It hasn't run on two machines. Both agents ran on one Mac through a local relay.
+- It hasn't run on two physical machines. Two VMs on one Mac share a host, a network path and a clock source.
+- Showing and mucking haven't run on public devnet or between the VMs, only on a local validator and in the contract's tests.
 - The relay has no matchmaking, and hasn't faced the public internet.
 - The deployed program is upgradeable, so the "deployer" row in the design doesn't hold yet.
 - Nobody independent has reviewed this design or code.

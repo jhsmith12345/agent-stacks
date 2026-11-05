@@ -8,7 +8,7 @@ export const NONE=255,BETTING=0,BOARD=1,SHOWDOWN=2,COMPLETE=3;
 export const P_HOLE_B=5,P_DONE=6,P_HOLE_A=7,P_BETTING=8,P_BOARD_A=9,P_BOARD_B=10,P_SHOW_A=11,P_SHOW_B=12;
 export const PHYSICAL=[0,1,2,3,5,6,7,9,11];
 export const KIND_STACKS=1,KIND_CLOSE=2,KIND_HAND=3;
-export const BLOB_BYTES=1311,GAME_BYTES=89;
+export const BLOB_BYTES=1312,GAME_BYTES=89;
 const DOMAIN=Buffer.from('agent-stacks/channel/v1');
 const fail=message=>{const error=Error(message);error.invalidMove=true;throw error;};
 const ensure=(ok,message='Invalid move')=>{if(!ok)fail(message);};
@@ -90,7 +90,7 @@ function five(cards){
  if(groups[0][0]===2)return [1,groups[0][1],groups[1][1],groups[2][1],groups[3][1],0];
  return [0,...ranks.slice(0,5)];
 }
-const greater=(a,b)=>{for(let i=0;i<6;i++)if(a[i]!==b[i])return a[i]>b[i];return false;};
+export const greater=(a,b)=>{for(let i=0;i<6;i++)if(a[i]!==b[i])return a[i]>b[i];return false;};
 export function evaluate(cards){
  ensure(cards.length>=5&&cards.length<=7&&cards.every(c=>Number.isInteger(c)&&c>=0&&c<52)&&new Set(cards).size===cards.length,'Invalid cards');
  let best=[0,0,0,0,0,0];const n=cards.length;
@@ -98,6 +98,11 @@ export function evaluate(cards){
   const score=five([cards[a],cards[b],cards[c],cards[d],cards[e]]);if(greater(score,best))best=score;
  }
  return best;
+}
+// The second player to show gives up the pot. Their cards are never revealed.
+export function muck(g,seat){
+ ensure(g.stage===SHOWDOWN&&(seat===0||seat===1),'Mucking is not allowed now');
+ award(g,1-seat,3);
 }
 export function showdown(g){
  ensure(g.stage===SHOWDOWN,'Showdown is not due');
@@ -120,7 +125,7 @@ export function decodeGame(b){
 // One hand as both agents and the contract see it. `cards` holds only the nine positions that can be revealed.
 export function acceptedHand({hand,keys,deck,stacks,bigBlind}){
  ensure(deck.length===52&&keys.length===2,'Invalid accepted deck');
- return {phase:P_HOLE_B,cursor:0,hand,keys:[...keys],cards:PHYSICAL.map(i=>({a:deck[i].a,b:deck[i].b})),game:newGame(stacks,bigBlind,(hand-1)%2),shares:Array.from({length:9},()=>[zero,zero])};
+ return {phase:P_HOLE_B,cursor:0,hand,keys:[...keys],cards:PHYSICAL.map(i=>({a:deck[i].a,b:deck[i].b})),game:newGame(stacks,bigBlind,(hand-1)%2),shares:Array.from({length:9},()=>[zero,zero]),aggressor:NONE};
 }
 export function encodeHand(s){
  const out=Buffer.alloc(BLOB_BYTES);out[0]=s.phase;out[1]=s.cursor;out.writeUInt32LE(s.hand,2);
@@ -128,13 +133,20 @@ export function encodeHand(s){
  s.cards.forEach((c,i)=>{Buffer.from(c.a+c.b,'hex').copy(out,70+i*64);});
  encodeGame(s.game).copy(out,646);
  s.shares.forEach((p,i)=>{Buffer.from(p[0]+p[1],'hex').copy(out,735+i*64);});
+ out[1311]=s.aggressor;
  return out;
 }
 export function decodeHand(b){
  ensure(b.length===BLOB_BYTES,'Invalid hand bytes');
  const hex=(at,n=32)=>b.subarray(at,at+n).toString('hex');
- return {phase:b[0],cursor:b[1],hand:b.readUInt32LE(2),keys:[hex(6),hex(38)],cards:Array.from({length:9},(_,i)=>({a:hex(70+i*64),b:hex(102+i*64)})),game:decodeGame(b.subarray(646,735)),shares:Array.from({length:9},(_,i)=>[hex(735+i*64),hex(767+i*64)])};
+ return {phase:b[0],cursor:b[1],hand:b.readUInt32LE(2),keys:[hex(6),hex(38)],cards:Array.from({length:9},(_,i)=>({a:hex(70+i*64),b:hex(102+i*64)})),game:decodeGame(b.subarray(646,735)),shares:Array.from({length:9},(_,i)=>[hex(735+i*64),hex(767+i*64)]),aggressor:b[1311]};
 }
+// Who shows first: the player who got called, meaning the last to bet or raise in the final betting round.
+// If nobody bet on it, the first to act on it.
+export const firstShower=s=>s.aggressor<2?s.aggressor:1-s.game.button;
+const showPhase=seat=>seat===0?P_SHOW_A:P_SHOW_B;
+// Only the second to show may muck, and only before revealing either card.
+export const mayMuck=s=>s.phase===showPhase(1-firstShower(s))&&s.cursor===0;
 export function stacksPayload(hand,stacks){const b=Buffer.alloc(20);b.writeUInt32LE(hand,0);b.writeBigUInt64LE(BigInt(stacks[0]),4);b.writeBigUInt64LE(BigInt(stacks[1]),12);return b;}
 export function closePayload(stacks){const b=Buffer.alloc(16);b.writeBigUInt64LE(BigInt(stacks[0]),0);b.writeBigUInt64LE(BigInt(stacks[1]),8);return b;}
 export const sha256=(...parts)=>{const h=createHash('sha256');for(const p of parts)h.update(p);return h.digest();};
@@ -161,7 +173,7 @@ export function owedPositions(s){
 }
 function sync(s){
  s.cursor=0;
- const phase=[P_BETTING,P_BOARD_A,P_SHOW_A,P_DONE][s.game.stage];ensure(phase!==undefined,'Invalid stage');s.phase=phase;
+ const phase=[P_BETTING,P_BOARD_A,showPhase(firstShower(s)),P_DONE][s.game.stage];ensure(phase!==undefined,'Invalid stage');s.phase=phase;
 }
 const CARD_INDEX=new Map(initialDeck().map((c,i)=>[c.b,i]));
 function decodeCard(s,logical){
@@ -170,7 +182,14 @@ function decodeCard(s,logical){
  ensure(index!==undefined,'Decryption does not encode a card');return index;
 }
 export function applyAction(s,seat,action,amount=0){
- ensure(s.phase===P_BETTING,'Betting is not due');act(s.game,seat,action,amount);sync(s);return s;
+ ensure(s.phase===P_BETTING,'Betting is not due');
+ const before=s.game.currentBet;act(s.game,seat,action,amount);
+ if(s.game.currentBet>before)s.aggressor=seat;
+ sync(s);return s;
+}
+export function applyMuck(s,seat){
+ ensure(obligated(s)===seat&&mayMuck(s),'Mucking is not allowed now');
+ muck(s.game,seat);sync(s);return s;
 }
 // `wire` is the same DLEQ encoding the contract's share instruction takes.
 export function parseShare(wire){
@@ -180,7 +199,7 @@ export function parseShare(wire){
  return {context:wire.subarray(2,2+n).toString('utf8'),publicKey:field(0),base2:field(1),share:field(2),proof:{t1:field(3),t2:field(4),s:field(5)}};
 }
 export function applyShare(s,context,seat,logical,wire){
- const phase=s.phase,expected=owedPositions(s),cursor=s.cursor;
+ const phase=s.phase,expected=owedPositions(s),cursor=s.cursor,first=firstShower(s);
  ensure(obligated(s)===seat&&cursor<expected.length&&logical===expected[cursor],'Share is not owed');
  const parsed=parseShare(wire);
  ensure(parsed.context===context,'Wrong share context');
@@ -196,9 +215,15 @@ export function applyShare(s,context,seat,logical,wire){
   if(phase===P_HOLE_B)s.phase=P_HOLE_A;
   else if(phase===P_HOLE_A)sync(s);
   else if(phase===P_BOARD_A)s.phase=P_BOARD_B;
-  else if(phase===P_BOARD_B){resumeBoard(s.game);sync(s);}
-  else if(phase===P_SHOW_A)s.phase=P_SHOW_B;
-  else if(phase===P_SHOW_B){showdown(s.game);sync(s);}
+  else if(phase===P_BOARD_B){
+   resumeBoard(s.game);
+   // A new betting round starts the question of who got called over again. With a player all in, no
+   // betting round follows, so the last bet still stands.
+   if(s.game.stage===BETTING)s.aggressor=NONE;
+   sync(s);
+  }
+  else if(phase===showPhase(first))s.phase=showPhase(1-first);
+  else if(phase===P_SHOW_A||phase===P_SHOW_B){showdown(s.game);sync(s);}
   else fail('Invalid phase');
  }
  return s;

@@ -14,7 +14,7 @@ import {acceptedManifest} from '../src/channel/manifest.js';
 import {privateDirectory} from '../src/private-files.js';
 import {acquireLock} from '../src/lock.js';
 import {spawnSync} from 'node:child_process';
-import {existsSync,mkdirSync,mkdtempSync,readdirSync,readFileSync,rmSync,unlinkSync as unlinkSync2,utimesSync,writeFileSync} from 'node:fs';
+import {existsSync,mkdirSync,mkdtempSync,readdirSync,readFileSync,rmSync,utimesSync,writeFileSync} from 'node:fs';
 import {uptime} from 'node:os';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
@@ -274,7 +274,7 @@ test('after a crash an agent takes over a dead lock by itself, and never a live 
  writeFileSync(path,`${process.pid}\nsome-other-boot\n`);
  if(existsSync('/proc/sys/kernel/random/boot_id')){release=acquireLock(directory,'agent.lock',options);release();}
  else assert.throws(()=>acquireLock(directory,'agent.lock',options),/already locked/,'without boot IDs it stays cautious');
- unlinkSync2(path);
+ rmSync(path,{force:true});
  // Older tools keep refusing, and need a person to look.
  writeFileSync(path,`${dead}\n`);
  assert.throws(()=>acquireLock(directory,'agent.lock'),/already locked/);

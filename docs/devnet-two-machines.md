@@ -1,6 +1,6 @@
 # Two-machine devnet runbook
 
-**Status: rehearsed end to end on a local validator using devnet's feature set; not yet run on public devnet.** Test funds only. The client refuses mainnet and the agent accepts only `test-only` policies, so nothing here can touch real funds.
+**Status: the deploy and the low-cost demo have run on public devnet, and the whole procedure has been rehearsed on a local validator using devnet's feature set. The full-proof path hasn't run on public devnet, and no run has used two machines.** Test funds only. The client refuses mainnet and the agent accepts only `test-only` policies, so nothing here can touch real funds.
 
 ## What this run proves
 
@@ -23,7 +23,7 @@ These were read from the live cluster on 2026-11-05. Rerun `npm run devnet:prefl
 | Consensus | Alpenglow active since slot 504144000; finalized stayed level with confirmed in all 12 samples | Finality is far quicker than the roughly 13 seconds local runs assumed |
 | Slot time | About 0.24 s | Local validators default to 0.4 s, and a blockhash expires sooner |
 | Rent | 5,080 lamports per byte, with cuts to 2,575, 1,322 and 696 queued | A proof buffer costs 3.32 SOL, where a default local validator charges 4.54 SOL. Budgets must be read from the cluster |
-| Public RPC | About 50 ms; 30 parallel requests had 21 refused with HTTP 429; 30 requests at 10 per second had none, though preflight's other reads still drew a few | One busy agent is close to the limit, and two on one IP will go over it |
+| Public RPC | About 50 ms; 30 parallel requests had 21 refused with HTTP 429; 30 requests at 10 per second had none in one sample and 4 refused in another | One busy agent is close to the limit, and two on one IP will go over it |
 | Priority fees | 0 at every percentile sampled | No bidding needed today, but a policy can't change mid-match, so set a ceiling up front |
 | Mainnet | Same rent and consensus features as devnet | Devnet is a fair preview at the moment |
 
@@ -48,11 +48,12 @@ You don't need all of it to get a first public result. The demo in [local/devnet
 | Deploy plus full-proof demo | 4.40 | Real timing for the full-proof shuffle |
 | Separate player wallets, as below | 7.70 | The two-machine run this runbook describes |
 
-Where test SOL can come from, as of 2026-11-05:
+Real SOL doesn't become test SOL: mainnet and devnet are separate ledgers, so sending real SOL to an address leaves its devnet balance unchanged. Where test SOL can come from, as of 2026-11-05:
 
 - **`solana airdrop` no longer works on the public endpoint.** The CLI reports a possible rate limit, but the node's actual reply is HTTP 410, "The RPC faucet is closed on this cluster". Retrying can't help.
 - **[Solana web faucet](https://faucet.solana.com):** for people, not automated tools. Signing in with GitHub raises its limit, but its checks can refuse an account, and it refused one with too few public repos. Don't make a private repo public to pass that check.
-- **[Chainstack's faucet](https://chainstack.com/solana-faucet/) and other provider faucets:** each needs an account with that provider.
+- **[Chainstack's faucet](https://chainstack.com/solana-faucet/) and other provider faucets:** each needs an account with that provider. Several faucets that advertise no requirements failed when tried on 2026-11-05.
+- **[QuickNode's faucet](https://faucet.quicknode.com/solana/devnet):** needs no account, but requires a small mainnet balance on the claiming wallet, and allows one claim per address every 12 hours. Claim with a wallet you already own if you can, then send the test SOL across on devnet. Using the project payer instead puts real SOL on a key stored unencrypted, so send only the minimum and move it off once you've finished claiming.
 - **A person who already has devnet SOL** can simply send it. It has no value.
 - **`devnet-pow`:** pays for computation, and is listed in [Solana's guide](https://solana.com/developers/guides/getstarted/solana-token-airdrop-and-faucets). The crate was last updated in May 2023 and names no source repository, so review it before installing, and it may not work on today's cluster.
 
@@ -98,6 +99,8 @@ node scripts/devnet.js status
 ```
 
 Fund the printed addresses, then deploy. This keeps upgrade authority on the project payer, which is acceptable for test funds only. The command refuses to redeploy over an existing program.
+
+Writes go straight to validators, because the public RPC's limits let only 14 of 187 chunks through in 281 seconds. Sent to validators, the rest took 8 seconds, so a network that blocks outbound UDP may not be able to deploy. If a deploy stops partway, run it again. It resumes the same buffer, and the rent already in that buffer still counts.
 
 ```bash
 npm run devnet:deploy
@@ -184,7 +187,18 @@ Keep the preflight reports, both `agent.log` files, the receipt, the policy flag
 
 ## What to expect
 
-These come from local rehearsals through a proxy acting as one hosted RPC, with 55 ms of latency and a local validator's 0.4 s slots. Public devnet's slots are faster and its load is real, so treat these as a guide. Measuring the real numbers is the purpose of stage 1.
+The first public run, on 2026-11-05, was the low-cost demo through the public RPC, with both players on one machine:
+
+| Measure | Result |
+| --- | --- |
+| Deploy cost | 0.9505 SOL, nearly all of it rent |
+| Match | 2 hands in 7.7 minutes |
+| On-chain cost | 86 transactions and 470,000 lamports, the same as local runs |
+| Receipt | Verified from chain in 168 seconds |
+
+That demo took about 4 times as long as in rehearsal, and rate limiting is the likely cause: its log shows 485 refused requests. Full-proof matches make far more requests, so the rehearsal figures below are probably optimistic, and they're a reason to use a hosted endpoint for stage 1.
+
+The rest come from local rehearsals through a proxy acting as one hosted RPC, with 55 ms of latency and a local validator's 0.4 s slots. Measuring the real numbers is the purpose of stage 1.
 
 The two-machine run below played 2 hands with both agents on one Mac, each with its own wallet and state. The proxy also shared one rate limit between them (100 requests per 10 seconds, 40 per method), failed 0.5% of requests with HTTP 503 and answered 3% from a lagging backend. Three faults were injected during the match: a hard crash of A mid-upload, a 120-second network cut on B, and a hard crash of B during card reveals.
 

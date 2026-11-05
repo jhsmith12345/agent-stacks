@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
 import {once} from 'node:events';
 import {spawn} from 'node:child_process';
-import {mkdtempSync,rmSync,readFileSync,writeFileSync,readdirSync,mkdirSync} from 'node:fs';
+import {existsSync,mkdtempSync,rmSync,readFileSync,writeFileSync,readdirSync,mkdirSync} from 'node:fs';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {tmpdir} from 'node:os';
@@ -48,7 +48,7 @@ async function scriptedNode(t,{genesis=DEVNET_GENESIS,balance=50_000_000_000,lam
    case 'getAccountInfo':{
     if(node.enforceMinContext&&request.params[1]?.minContextSlot>slot){error={code:-32016,message:'Minimum context slot has not been reached'};break;}
     const account=node.accounts.get(request.params[0]);
-    result={...context,value:account?{owner:account.owner,lamports:1,executable:!!account.executable,rentEpoch:0,data:[account.data.toString('base64'),'base64'],space:account.data.length}:null};
+    result={...context,value:account?{owner:account.owner,lamports:account.lamports??1,executable:!!account.executable,rentEpoch:0,data:[account.data.toString('base64'),'base64'],space:account.data.length}:null};
     break;
    }
    default:error={code:-32601,message:`Unsupported test RPC method ${request.method}`};
@@ -212,8 +212,8 @@ test('without a separate wallet the project payer still creates the match',{time
  const payer=await ensureWallet(join(directory,'.agent-stacks/devnet/payer-keypair.json'));
  assert.equal(JSON.parse(readFileSync(JSON.parse(made.out).manifest,'utf8')).players[0],payer.publicKey.toBase58());
 });
-async function settledMatch(t){
- const directory=workspace(t),node=await scriptedNode(t),creator=await Keypair.generate(),joiner=await Keypair.generate(),program=await Keypair.generate();
+async function settledMatch(t,nodeOptions={}){
+ const directory=workspace(t),node=await scriptedNode(t,nodeOptions),creator=await Keypair.generate(),joiner=await Keypair.generate(),program=await Keypair.generate();
  const nonce=Buffer.alloc(32,4),[match,bump]=await PublicKey.findProgramAddress([Buffer.from('escrow'),creator.publicKey.toBytes(),nonce],program.publicKey);
  const config={program:program.publicKey.toBase58(),players:[creator.publicKey.toBase58(),joiner.publicKey.toBase58()],match:match.toBase58(),nonce:nonce.toString('hex'),buyIn:1_000_000,bigBlind:20_000,maxHands:2,turnSeconds:86_400,genesis:DEVNET_GENESIS};config.terms=termsHash(config);
  const state=matchState(config,creator,joiner,nonce,bump,{phase:6,hand:2});state[LAYOUT.game+76]=3;u64(1_020_000).copy(state,201);u64(980_000).copy(state,209);
@@ -224,7 +224,8 @@ async function settledMatch(t){
   return {signature,tx:{slot:1,blockTime:1,version:'legacy',meta:{err:null,fee:5000,preBalances:keys.map(()=>0),postBalances:keys.map(()=>0)},transaction:{signatures:[signature],message:{header:{numRequiredSignatures:1,numReadonlySignedAccounts:0,numReadonlyUnsignedAccounts:1},accountKeys:keys,recentBlockhash:'11111111111111111111111111111111',instructions:[{programIdIndex:0,accounts:accounts.map((_,i)=>i+1),data:getBase58Decoder().decode(Uint8Array.of(tag,0,0,0,0,0,0,0,0))}]}}}};
  };
  const [a,b]=config.players,verify=()=>run(script('verify-chain-match.js'),[manifest,receipt],{cwd:directory,env:{AGENT_STACKS_RPC:node.url,AGENT_STACKS_ALLOW_LOCAL:'1'}});
- return {node,verify,receipt,creation:sent(1,[a,b,config.match],1),later:sent(2,[config.match,a,b],15)};
+ const cost=()=>run(script('measure-compact-cost.js'),[manifest,join(directory,'cost.json')],{cwd:directory,env:{AGENT_STACKS_RPC:node.url,AGENT_STACKS_ALLOW_LOCAL:'1'}});
+ return {node,verify,cost,receipt,creation:sent(1,[a,b,config.match],1),later:sent(2,[config.match,a,b],15)};
 }
 test('the verifier refuses a history that has lost the start of the match, and leaves no receipt',{timeout:30000},async t=>{
  const s=await settledMatch(t);s.node.history=[s.later];
@@ -233,10 +234,44 @@ test('the verifier refuses a history that has lost the start of the match, and l
  assert.equal(`${pruned.out}${pruned.err}`.includes(SECRET),false,'the API key must not be printed');
  assert.throws(()=>readFileSync(s.receipt),{code:'ENOENT'});
 });
+test('the verifier rides out a node that keeps refusing requests',{timeout:60000},async t=>{
+ const s=await settledMatch(t,{failEvery:3});s.node.history=[s.later];
+ const result=await s.verify();
+ assert.equal(result.code,1);assert.match(result.err,/no longer holds this match.s full history/,'every read still arrives');
+});
+test('the cost tool rides out a node that keeps refusing requests',{timeout:60000},async t=>{
+ const s=await settledMatch(t,{failEvery:3});s.node.history=[s.later,s.creation];
+ const result=await s.cost();
+ assert.doesNotMatch(result.err,/503|rpcFailure|temporarily unavailable/);
+ const steady=await settledMatch(t);steady.node.history=[steady.later,steady.creation];
+ const expected=await steady.cost();
+ assert.equal(result.code,expected.code,'the same outcome as on a healthy node');
+ assert.equal(result.err.split('\n').find(l=>/Error:/.test(l)),expected.err.split('\n').find(l=>/Error:/.test(l)));
+});
 test('the verifier reads on when the creating transaction is still there',{timeout:30000},async t=>{
  const s=await settledMatch(t);s.node.history=[s.later,s.creation];
  const result=await s.verify();
  assert.equal(result.code,1,'this fixture ends before a complete hand');assert.doesNotMatch(result.err,/no longer holds/);
+});
+
+test('a deploy that stopped partway can resume on the rent its buffer already holds',{timeout:30000},async t=>{
+ const directory=workspace(t),log=join(directory,'cli-args'),cli=join(directory,'fake-solana');
+ mkdirSync(join(directory,'target/deploy'),{recursive:true});writeFileSync(join(directory,'target/deploy/agent_stacks_escrow.so'),ARTIFACT);
+ writeFileSync(cli,`#!/bin/sh\nprintf '%s\\n' "$@" > "${log}"\necho '{"programId":"test"}'\n`,{mode:0o755});
+ const rent=(ARTIFACT.length+45+128)*5080,node=await scriptedNode(t,{balance:50_000_000}),env={AGENT_STACKS_RPC:node.url,AGENT_STACKS_ALLOW_LOCAL:'1',SOLANA_CLI:cli};
+ const deploy=()=>run(script('devnet.js'),['deploy'],{cwd:directory,env});
+ const otherChain=await scriptedNode(t,{genesis:'11111111111111111111111111111111'});
+ const refused=await run(script('devnet.js'),['deploy'],{cwd:directory,env:{...env,AGENT_STACKS_RPC:otherChain.url}});
+ assert.equal(refused.code,1);assert.match(refused.err,/devnet-only/);assert.equal(existsSync(log),false,'a local validator is never deployed to');
+ const short=await deploy();assert.equal(short.code,1);assert.match(short.err,/needs funding/);
+ const buffer=await ensureWallet(join(directory,'.agent-stacks/devnet/deploy-buffer-keypair.json'));
+ node.accounts.set(buffer.publicKey.toBase58(),{owner:'BPFLoaderUpgradeab1e11111111111111111111111',lamports:rent-1,data:Buffer.alloc(8)});
+ const stillShort=await deploy();assert.equal(stillShort.code,1,'one lamport short of the whole cost');assert.match(stillShort.err,/needs funding/);
+ node.accounts.get(buffer.publicKey.toBase58()).lamports=rent;
+ const resumed=await deploy();assert.equal(resumed.code,0,resumed.err);
+ const args=readFileSync(log,'utf8').split('\n');
+ assert.match(args[args.indexOf('--buffer')+1],/\.agent-stacks\/devnet\/deploy-buffer-keypair\.json$/,'resumes the same buffer');
+ assert.equal(args.includes('--use-rpc'),false,'the public RPC refuses most writes, so they go to validators');
 });
 
 test('status prices the run from the cluster’s current rent and hides the key',{timeout:30000},async t=>{

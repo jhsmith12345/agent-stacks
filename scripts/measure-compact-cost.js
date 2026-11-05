@@ -2,9 +2,10 @@
 import {readFileSync,writeFileSync,mkdirSync} from 'node:fs';
 import {resolve,dirname} from 'node:path';
 import {getBase58Encoder} from '@solana/kit';
-import {ChainClient,DEVNET,PublicKey} from '../src/solana/client.js';
+import {ChainClient,DEVNET,PublicKey,patientConnection} from '../src/solana/client.js';
 const config=JSON.parse(readFileSync(resolve(process.argv[2]),'utf8'));
 const client=new ChainClient(process.env.AGENT_STACKS_RPC??config.rpc??DEVNET,config.program,null,{allowLocal:process.env.AGENT_STACKS_ALLOW_LOCAL==='1'});
+client.connection=patientConnection(client.connection,{tries:7});
 const genesis=await client.checkNetwork();if(genesis!==config.genesis)throw Error('Wrong genesis');
 const state=await client.match(config.match,config);if(state.phase!==6||state.game.stage!==3)throw Error('Expected completed poker match');
 const transactions=new Map();

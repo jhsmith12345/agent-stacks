@@ -32,13 +32,15 @@ try {
  if(command==='status'){console.log(JSON.stringify({...status,budget:await budget()},null,2));}
  else if(command==='deploy'){
   if(status.programDeployed)throw Error('This program is already deployed, and redeploying would replace code that agents have pinned. Use a new program keypair for a new version.');
-  if(local)throw Error('Use validator --bpf-program for local testing; this deployment command is devnet-only');
+  if(genesis!==DEVNET_GENESIS)throw Error('Use validator --bpf-program for local testing; this deployment command is devnet-only');
   if(!existsSync(artifact))throw Error('Run npm run solana:build first');
   const size=readFileSync(artifact).length;const rent=Number(await client.connection.getMinimumBalanceForRentExemption(size+45));
-  if(balance<rent+50_000_000)throw Error(`Devnet wallet needs funding. Current ${balance/1e9} SOL; program rent is about ${rent/1e9} SOL. Fund ${status.payer} with test SOL.`);
+  // A deploy that stopped partway has already paid its rent into the buffer, and resuming needs only fees.
+  const bufferFile=resolve(directory,'deploy-buffer-keypair.json');const buffer=await ensureWallet(bufferFile);
+  const paid=Number((await client.connection.getAccountInfo(buffer.publicKey,'confirmed'))?.lamports??0);
+  if(balance+paid<rent+50_000_000)throw Error(`Devnet wallet needs funding. Current ${balance/1e9} SOL; program rent is about ${rent/1e9} SOL. Fund ${status.payer} with test SOL.`);
   const cli=process.env.SOLANA_CLI??resolve('.tools/solana-release/bin/solana');
-  const bufferFile=resolve(directory,'deploy-buffer-keypair.json');await ensureWallet(bufferFile);
-  const args=['program','deploy',artifact,'--program-id',resolve(directory,'program-keypair.json'),'--buffer',bufferFile,'--keypair',resolve(directory,'payer-keypair.json'),'--upgrade-authority',resolve(directory,'payer-keypair.json'),'--url',rpc,'--use-rpc','--max-sign-attempts','5','--output','json'];
+  const args=['program','deploy',artifact,'--program-id',resolve(directory,'program-keypair.json'),'--buffer',bufferFile,'--keypair',resolve(directory,'payer-keypair.json'),'--upgrade-authority',resolve(directory,'payer-keypair.json'),'--url',rpc,'--max-sign-attempts','20','--output','json'];
   console.log(`Deploying ${size} bytes to devnet program ${status.program}. Upgrade authority is the project devnet payer.`);
   const child=spawn(cli,args,{stdio:['ignore','pipe','inherit']});let output='';child.stdout.on('data',b=>{output+=b;process.stdout.write(b);});
   const [code]=await once(child,'exit');if(code!==0)throw Error(`Deployment exited ${code}; inspect the project-owned buffer before retrying`);

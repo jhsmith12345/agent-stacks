@@ -3,7 +3,7 @@
 import {existsSync,readFileSync} from 'node:fs';
 import {createHash} from 'node:crypto';
 import {resolve} from 'node:path';
-import {ChainClient,PublicKey,SystemProgram,DEVNET_GENESIS,LAYOUT,loadWallet,manifestRpc,redactRpc,termsHash} from '../src/solana/client.js';
+import {ChainClient,PublicKey,SystemProgram,DEVNET_GENESIS,LAYOUT,loadWallet,manifestRpc,patientConnection,redactRpc,termsHash} from '../src/solana/client.js';
 import {Transaction,VersionedTransaction} from '@solana/web3.js';
 import {loadTrustPolicy,validateAcceptedMatch,verifyPinnedProgram,strictFundingRequired,PROOF_ACCOUNT_BYTES} from '../src/solana/trusted-agent.js';
 const args=process.argv.slice(2),value=name=>args.includes(name)?args[args.indexOf(name)+1]:null;
@@ -18,12 +18,7 @@ const policy=loadTrustPolicy(value('--policy'));
 const wallet=await loadWallet(resolve(value('--wallet')));
 const me=wallet.publicKey.toBase58();
 const client=new ChainClient(policy.rpc,policy.program,wallet,{allowLocal:policy.allowLocal,commitment:'finalized'});
-// One failed request from a hosted endpoint says little about that endpoint, so look again before reporting it.
-// Only RPC failures are retried. A slot the node hasn't reached is an answer, not a failure.
-client.connection=new Proxy(client.connection,{get(target,key){
- const method=target[key];if(typeof method!=='function')return method;
- return async(...args)=>{for(let tries=0;;tries++){try{return await method.apply(target,args);}catch(error){if(!error.rpcFailure||tries>=4||/-32016|context slot/i.test(`${error.code} ${error.message}`))throw error;await pause(500*2**tries);}}};
-}});
+client.connection=patientConnection(client.connection);
 const connection=client.connection;
 const report={rpc:redactRpc(policy.rpc),wallet:me,program:policy.program};
 

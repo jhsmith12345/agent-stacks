@@ -33,6 +33,15 @@ export function obligated(m){if([1,3,7,9,11].includes(m.phase))return 0;if([2,4,
 export function positions(m){if([5,11].includes(m.phase))return [0,2];if([7,12].includes(m.phase))return [1,3];if([9,10].includes(m.phase)){if(m.game.street===1)return [4,5,6];if(m.game.street===2)return [7];if(m.game.street===3)return [8];throw Error('Invalid board street');}throw Error('No card-share obligation');}
 export const PHYSICAL=[0,1,2,3,5,6,7,9,11];
 const DEFAULT_COMPUTE_UNITS=200_000;
+// For read-only tools that make many requests in a row: one refused request says little about a node,
+// so look again before giving up. Only RPC failures are retried, and a slot the node hasn't reached is an
+// answer, not a failure.
+export function patientConnection(connection,{tries=4,firstPauseMs=500}={}){
+ return new Proxy(connection,{get(target,key){
+  const method=target[key];if(typeof method!=='function')return method;
+  return async(...args)=>{for(let attempt=0;;attempt++){try{return await method.apply(target,args);}catch(error){if(!error.rpcFailure||attempt>=tries||/-32016|context slot/i.test(`${error.code} ${error.message}`))throw error;await setTimeout(firstPauseMs*2**attempt);}}};
+ }});
+}
 // Every failure from the RPC layer is tagged, so a caller can retry it without guessing from error
 // text and cannot mistake it for a security check failing. Requests are time-limited because a node
 // that never answers would otherwise stall an agent past its deadline.

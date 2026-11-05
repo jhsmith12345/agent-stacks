@@ -1,8 +1,37 @@
 # Local Solana integration reports
 
+## First public devnet run
+
+This was the first run on public devnet, on 2026-11-05: the deploy and the low-cost demo, through the public RPC, with both players on one Mac. Program bytecode and cryptography are unchanged.
+
+| Field | Result |
+| --- | --- |
+| Genesis | `EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG` |
+| Program | `HJeuy3rTLNDktmMFGREW8nHoqFCLkfD8dYX3HPmA4FhJ`; upgrade authority is the project payer |
+| Deployed bytes | Dumped from chain and matched `9232974b753314d5e7dbcde07a29b82596326cd1b2afedd1b12217f1542c376a` |
+| Deploy cost | 0.95050368 SOL, nearly all of it rent |
+| Match | `Cux8Wpe2eb4RSJrUGVUSquEbYknsgwFaikBeMvHkKAUy`, left open rather than closed |
+| Path | Cooperative shuffle; the full-proof path was not run |
+| Terminal state | Two hands in 462 seconds, version 62, no pending payouts |
+| Awards | 1,000,000 / 1,000,000 lamports |
+| Protocol cost | 86 transactions / 470,000 lamports including setup; 42 / 230,000 per hand excluding setup, the same as the local runs |
+| Final transaction | One signer; 91,901 CU; 5,000-lamport fee |
+| Receipt | Rebuilt from chain data in 168 seconds, from 66 match-address transactions |
+| Rate limiting | 485 refused requests in the demo's log, and 123 during verification |
+
+Public receipts: `.agent-stacks/reports/devnet-first-match.json` and `devnet-first-cost.json`.
+
+The rehearsal below hadn't predicted three things, all now fixed:
+
+- Deploying through the public RPC with `--use-rpc` failed after 281 seconds, with only 14 of 187 chunks written. The rehearsal's proxy had let that same path succeed. Sending the writes straight to validators finished the rest in 8 seconds.
+- The deploy's balance check ignored rent already paid into the buffer, so a wallet on the minimum budget couldn't have retried.
+- The verifier stopped on the first refused read, because retries stop at the RPC library's own limit. It and the cost tool now look again with longer pauses.
+
+The demo took about 4 times as long as in rehearsal (462 seconds against 114), so the proxy's limits understated the public RPC's. Treat the rehearsal's full-proof timings as optimistic. This run covers the public network's timing and cost for the low-cost path only. It's same-host evidence through a third-party RPC, and says nothing about the trust boundary or separate hosts.
+
 ## Two-machine devnet rehearsal
 
-This rehearsed the [two-machine runbook](devnet-two-machines.md) on 2026-11-05. It ran on one Mac, against a local validator using devnet's feature set (`--clone-feature-set --url https://api.devnet.solana.com`, `--limit-ledger-size 5000000`). Rent and slot time stayed at local defaults. Program bytecode and cryptography are unchanged. Nothing has run on public devnet yet, and this says nothing about separate hosts or real network conditions.
+This rehearsed the [two-machine runbook](devnet-two-machines.md) on 2026-11-05. It ran on one Mac, against a local validator using devnet's feature set (`--clone-feature-set --url https://api.devnet.solana.com`, `--limit-ledger-size 5000000`). Rent and slot time stayed at local defaults. Program bytecode and cryptography are unchanged. This says nothing about separate hosts or real network conditions.
 
 Both agents reached the validator through a proxy acting as one hosted RPC: an API key in the URL, 55 ms of latency, one shared rate limit (100 requests per 10 seconds, 40 per method), 0.5% of requests failed with HTTP 503, and 3% answered from a lagging backend.
 

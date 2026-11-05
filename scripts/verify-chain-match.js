@@ -2,10 +2,11 @@
 import {readFileSync,writeFileSync,mkdirSync,existsSync} from 'node:fs';
 import {resolve,dirname} from 'node:path';
 import {createHash} from 'node:crypto';
-import {ChainClient,DEVNET,PublicKey} from '../src/solana/client.js';
+import {ChainClient,DEVNET,PublicKey,patientConnection} from '../src/solana/client.js';
 import {findSettlement,claimedSeats,handTransitions,deferredSeatsFrom,hasCreation} from '../src/solana/receipts.js';
 const config=JSON.parse(readFileSync(resolve(process.argv[2]),'utf8'));
 const client=new ChainClient(process.env.AGENT_STACKS_RPC??config.rpc??DEVNET,config.program,null,{allowLocal:process.env.AGENT_STACKS_ALLOW_LOCAL==='1'});
+client.connection=patientConnection(client.connection,{tries:7});
 const genesis=await client.checkNetwork();if(genesis!==config.genesis)throw Error('Manifest genesis mismatch');
 const m=await client.match(config.match,config);
 if(m.phase!==6||m.game.stage!==3||m.payouts[0]+m.payouts[1]!==config.buyIn*2)throw Error('Match has not completed normal poker settlement');

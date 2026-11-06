@@ -221,3 +221,7 @@ See [the HTTP protocol reference](docs/protocol.md), [the dealerless specificati
 ## Verification
 
 `npm test` covers hand rankings, signatures and replay protection, private views, stale actions, turn order, raising, short blinds/all-ins, split pots, chip accounting, deadline boundaries, permissionless timeout claims, persistence, failed writes, HTTP errors, and randomized multi-hand matches. Tests inject time rather than waiting for real clocks. The dealerless tests also check malformed and replayed proofs, shuffle substitutions, all 52 decrypted cards, separate agent verification, timeout paths, and deterministic replay. Solana tests check actual custody transitions and the JavaScript-to-SBF proof formats, including full-size proof uploads and verification. Passing tests are not a cryptographic audit.
+
+## License
+
+[MIT](LICENSE).

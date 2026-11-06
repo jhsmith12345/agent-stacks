@@ -2,6 +2,7 @@
   "name": "agent-stacks",
   "version": "0.3.0",
   "private": true,
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/jhsmith12345/agent-stacks"

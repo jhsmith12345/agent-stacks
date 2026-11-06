@@ -8,8 +8,12 @@ import {COMPLETE,EXIT,OPEN,WAITING} from './chain.js';
 const quiet=error=>!!(error.rpcFailure||error.notSent||error.signature);
 const MAX_QUEUED=64;
 export class ChannelRunner{
- constructor({peer,chains,transport,bufferKey,stallMs=60_000,resendMs=5_000,pollMs=250,chainPollMs=15_000,disputePollMs=5_000,log=()=>{}}){
-  Object.assign(this,{peer,chains,transport,bufferKey,stallMs,resendMs,pollMs,chainPollMs,disputePollMs,log});
+ // `decider` is an outside program making this player's decisions, if there is one. `lastMomentMs` is how
+ // close to the on-chain deadline it stops being asked, because the move itself takes time to land.
+ constructor({peer,chains,transport,bufferKey,stallMs=60_000,resendMs=5_000,pollMs=250,chainPollMs=15_000,disputePollMs=5_000,decider=null,lastMomentMs=10_000,log=()=>{}}){
+  if(peer.outside&&!decider)throw Error('This agent is set up to ask a program for its decisions, but has no program');
+  Object.assign(this,{peer,chains,transport,bufferKey,stallMs,resendMs,pollMs,chainPollMs,disputePollMs,decider,lastMomentMs,log});
+  this.asking=null;this.answers=[];this.told=0;
   this.progressAt=Date.now();this.resentAt=0;this.chainAt=0;this.seen=null;this.stats={onChainTransactions:0,relayMessages:0};
   this.bufferAttempts=new Map();this.buffers=new Map();this.inbox=[];this.outgoing=[];this.sending=null;this.receiving=null;
  }
@@ -80,6 +84,7 @@ export class ChannelRunner{
   const peer=this.peer,now=Date.now();
   this.pumpRelay();
   for(const m of this.inbox.splice(0))await this.send(peer.receive(m));
+  if(this.decider)await this.decisions(now);
   const progress=peer.progress();
   if(progress!==this.seen){this.seen=progress;this.progressAt=now;}
   if(peer.state.evidence&&!this.reportedFork){await this.forkProof();}
@@ -105,6 +110,29 @@ export class ChannelRunner{
   try{await this.disputeStep(state);}
   catch(error){if(!quiet(error))this.log(`dispute: ${error.message}`);else this.log(`dispute retry: ${error.message}`);}
   return null;
+ }
+ // An outside program can take far longer than one pass of this loop, and everything else has to keep
+ // running meanwhile, so it answers in the background.
+ consult(limitMs=this.decider.limitMs){
+  const question=this.peer.question();
+  if(!question)return false;
+  if(!this.asking)this.asking=Promise.resolve().then(()=>this.decider.ask(question,limitMs))
+   .catch(error=>{this.log(`decision program: ${error.message}`);return null;})
+   .then(reply=>{this.answers.push({key:question.key,reply});this.asking=null;});
+  return true;
+ }
+ async decisions(now){
+  const peer=this.peer;
+  for(const {key,reply} of this.answers.splice(0)){
+   peer.answer(key,reply);
+   if(peer.state.disputed)this.chainAt=0;
+   else await this.send(peer.resume());
+   if(peer.overruled){this.log(`The decision program’s move isn’t allowed (${peer.overruled}), so the safe default applies`);peer.overruled=null;}
+  }
+  // This agent is the one holding things up, which says nothing about the opponent.
+  if(!peer.state.disputed&&this.consult())this.progressAt=now;
+  const results=peer.state.results??[];
+  for(;this.told<results.length;this.told++)this.decider.tell?.(results[this.told]);
  }
  async settleClosed(){
   const peer=this.peer,proof=peer.closeProof();
@@ -147,11 +175,11 @@ export class ChannelRunner{
   }
   if(state.phase===EXIT){await this.submit('settle',()=>this.chain.timeout());return;}
   if(time>=state.deadline){await this.submit('claim the timeout',()=>this.chain.timeout());return;}
-  await this.playOnChain(state);
+  await this.playOnChain(state,time);
  }
  // The hand continues on chain. Every step is checked locally first, so the chain's word alone
  // can't make this agent reveal anything.
- async playOnChain(state){
+ async playOnChain(state,time){
   const peer=this.peer,st=peer.state;
   const local=st.mine?.seq===state.seq?state.seq:st.seq;
   if(local<state.seq){
@@ -170,6 +198,14 @@ export class ChannelRunner{
    if(!(st.mine&&st.mine.seq===state.seq+1)||st.seq>state.seq)peer.adoptChainState(state.seq,state.blob);
   }else if(st.mine?.seq===state.seq){peer.confirmChainMove(state.seq);}
   if(st.s.phase===P_DONE||obligated(decodeHand(state.blob))!==peer.seat)return;
+  const question=peer.question();
+  if(question){
+   // The chain's clock is running, so a decision gets at most half of what's left, and none at the very end.
+   const left=(state.deadline-time)*1000;
+   if(left>this.lastMomentMs){this.consult(Math.min(this.decider.limitMs,left/2));return;}
+   this.log('Too close to the deadline to wait for a decision, so the safe default applies');
+   peer.answer(question.key,null);
+  }
   const move=peer.chainMove(state.seq);
   await this.submit(`on-chain move ${move.seq}`,()=>this.chain.move(peer.seat,state.seq,move.step,move.message,move.signature));
  }

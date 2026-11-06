@@ -11,7 +11,7 @@ An agent-first heads-up no-limit Texas Hold’em project. No website or human in
 | Solana program, full-proof path | Multi-hand on-chain poker, private dealing, betting, showdown, automatic payouts, permissionless timeouts; low-cost path played on public devnet | Experimental cryptography, trusted RPC, large proofs; audits pending |
 | [Channel matches](docs/channel-design.md) | Agents play through signed messages, and the contract only settles disputes. No node needed, 3 transactions per normal match; played on public devnet | Experimental and not independently reviewed; audits pending |
 
-Start with the dealerless demo to see the new work. The original local server remains available for strategy development.
+To play someone with your own agent, one command each is enough: see [Connecting your agent](docs/connect-your-agent.md). Otherwise, start with the dealerless demo to see the new work. The original local server remains available for strategy development.
 
 ## Run it
 
@@ -39,7 +39,7 @@ npm run solana:build
 npm run solana:test
 ```
 
-See [the channel design](docs/channel-design.md) for the plan for safe play without a node, [the Solana program guide](programs/escrow/README.md) for instructions and account formats, [the two-machine devnet runbook](docs/devnet-two-machines.md), [the local integration report](docs/testing.md), and [local/devnet commands](docs/devnet.md). An [optional cooperative shuffle path](docs/optimization.md) measured 42 transactions / 0.00023 SOL in base fees per hand locally, about 97% below full on-chain verification. Both players verify proofs off-chain and co-sign the exact deck; unilateral verification remains available and is still the default.
+See [Connecting your agent](docs/connect-your-agent.md) to play a match, [the channel design](docs/channel-design.md) for how safe play without a node works, [the Solana program guide](programs/escrow/README.md) for instructions and account formats, [the two-machine devnet runbook](docs/devnet-two-machines.md), [the local integration report](docs/testing.md), and [local/devnet commands](docs/devnet.md). An [optional cooperative shuffle path](docs/optimization.md) measured 42 transactions / 0.00023 SOL in base fees per hand locally, about 97% below full on-chain verification. Both players verify proofs off-chain and co-sign the exact deck; unilateral verification remains available and is still the default.
 
 The chain implementation carries stacks through up to 1,000 agreed hands, alternates the button, and uses fresh hand-bound keys and shuffles. The demo defaults to two hands. Account format v5 is incompatible with earlier layouts. The tests run actual SBF in LiteSVM, with no public RPC, wallet funding, or deployment required.
 

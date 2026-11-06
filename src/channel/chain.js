@@ -23,7 +23,7 @@ export function decodeChannel(b){
  if(b.length===8&&b.toString()==='ASTKEND5')return {retired:true,phase:COMPLETE};
  if(b.length!==CHANNEL_SPACE||b.subarray(0,8).toString()!=='ASTKCHN1')throw Error('Not a channel account');
  const n=at=>Number(b.readBigUInt64LE(at));
- return {phase:b[8],version:n(9),players:[new PublicKey(b.subarray(17,49)).toBase58(),new PublicKey(b.subarray(49,81)).toBase58()],buyIn:n(81),turnSeconds:n(89),deadline:Number(b.readBigInt64LE(97)),terms:b.subarray(105,137).toString('hex'),payouts:[n(201),n(209)],sessions:[b.subarray(SESSIONS,SESSIONS+32).toString('hex'),b.subarray(SESSIONS+32,SESSIONS+64).toString('hex')],seq:n(SEQ),window:Number(b.readBigInt64LE(WINDOW)),hand:b.readUInt32LE(HAND),cursor:b[CURSOR],pendingPayouts:b[8]===COMPLETE?b[CURSOR]:0,game:decodeGame(b.subarray(GAME,GAME+89)),nonce:b.subarray(217,249),bump:b[249]};
+ return {phase:b[8],version:n(9),players:[new PublicKey(b.subarray(17,49)).toBase58(),new PublicKey(b.subarray(49,81)).toBase58()],buyIn:n(81),turnSeconds:n(89),deadline:Number(b.readBigInt64LE(97)),terms:b.subarray(105,137).toString('hex'),payouts:[n(201),n(209)],sessions:[b.subarray(SESSIONS,SESSIONS+32).toString('hex'),b.subarray(SESSIONS+32,SESSIONS+64).toString('hex')],seq:n(SEQ),window:Number(b.readBigInt64LE(WINDOW)),aggressor:b[CHANNEL_SPACE-1],hand:b.readUInt32LE(HAND),cursor:b[CURSOR],pendingPayouts:b[8]===COMPLETE?b[CURSOR]:0,game:decodeGame(b.subarray(GAME,GAME+89)),nonce:b.subarray(217,249),bump:b[249]};
 }
 // The hand state the account holds, in the bytes both players sign.
 export function accountBlob(b){

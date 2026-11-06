@@ -59,7 +59,8 @@ async function setup(name,{hands=1,seconds=3600,reserves=[JUST_FEES,JUST_FEES]})
  return {name,dir,keys,manifest:JSON.parse(manifestText)};
  }catch(error){return returnFunds(error);}
 }
-const startAgent=(m,seat,{stall,poll=0.5})=>vm(seat,`AGENT_STACKS_STALL_SECONDS=${stall} AGENT_STACKS_POLL_SECONDS=${poll} setsid nohup node examples/channel-agent.js ${m.dir}/session.json ${m.dir}/state --manifest ${m.dir}/manifest.json --relay ${RELAY} --rpc ${DEVNET} >> ${m.dir}/agent.out 2>> ${m.dir}/agent.err < /dev/null & echo started`);
+const startAgent=(m,seat,{stall,poll=0.5,decide=null,think=10})=>vm(seat,`AGENT_STACKS_STALL_SECONDS=${stall} AGENT_STACKS_POLL_SECONDS=${poll} setsid nohup node examples/channel-agent.js ${m.dir}/session.json ${m.dir}/state --manifest ${m.dir}/manifest.json --relay ${RELAY} --rpc ${DEVNET}${decide?` --decide '${decide}' --think ${think}`:''} >> ${m.dir}/agent.out 2>> ${m.dir}/agent.err < /dev/null & echo started`);
+const bot=args=>`node examples/decision-bot.js ${args}`;
 // The brackets stop the pattern matching this very shell command.
 const AGENT="'examples/channel-agen[t]'";
 const killAgent=seat=>vm(seat,`pkill -9 -f ${AGENT}; sleep 1; pgrep -f ${AGENT} >/dev/null && echo alive || echo gone`);
@@ -111,6 +112,77 @@ function whenMessages(count,action){
  return state.done;
 }
 const SCENARIOS={
+ // Real bets, between two machines. Seat 0 bets every street and seat 1 calls, and shows only a winner.
+ async bets(){
+  const m=await setup('bets',{hands:4,seconds:600});on.tap=null;
+  const started=Date.now();
+  try{
+   await startAgent(m,0,{stall:180,poll:0.25,decide:bot('raise')});await startAgent(m,1,{stall:180,poll:0.25,decide:bot('call')});
+   const finals=await Promise.all([0,1].map(seat=>agentFinished(m,seat)));
+   const state=await chainState(m);
+   if(state.phase!==COMPLETE)throw Error('Not settled');
+   const records=finals[0].results;
+   if(!records?.length||records.length!==finals[1].results.length)throw Error('Both should record every hand');
+   for(const r of records)if(r.aggressor!==0||r.firstToShow!==0||(r.reason!==1&&r.reason!==3)||r.betting.filter(e=>e.action===3).length<4)throw Error(`Hand ${r.hand} didn't go as bet: ${JSON.stringify({aggressor:r.aggressor,first:r.firstToShow,reason:r.reason})}`);
+   const last=records.at(-1);
+   if(state.payouts[0]!==last.stacks[0]||state.payouts[1]!==last.stacks[1])throw Error(`The contract paid ${state.payouts}, but the last hand left ${last.stacks}`);
+   return {seconds:Math.round((Date.now()-started)/1000),hands:records.length,raises:records.reduce((n,r)=>n+r.betting.filter(e=>e.action===3).length,0),mucks:records.filter(r=>r.reason===3).length,shown:records.filter(r=>r.reason===1).length,transactions:await transactionCount(m),payouts:state.payouts,match:m.manifest.match};
+  }finally{await cleanUp(m);}
+ },
+ // A firewall cuts machine B off with real money in the pot, and it mucks on chain after being the caller.
+ async betsnetwork(){
+  const m=await setup('betsnetwork',{seconds:180,reserves:[CAN_POST,JUST_FEES]});
+  const started=Date.now();
+  try{
+   const fault=whenMessages(26,async()=>{
+    await vm(1,`sudo -n iptables -A OUTPUT -d ${HOST} -j DROP && echo blocked`);log('machine B can no longer reach the relay');
+   });
+   await startAgent(m,0,{stall:25,decide:bot('raise')});await startAgent(m,1,{stall:600,decide:bot('call --show never')});
+   await fault;
+   await Promise.all([0,1].map(seat=>agentFinished(m,seat,540_000)));
+   const state=await chainState(m);
+   if(state.phase!==COMPLETE)throw Error('Not settled');
+   const moves=[];
+   for(const seat of [0,1])moves.push(Number((await vm(seat,`grep -c 'on-chain move' ${m.dir}/agent.err || true`)).trim()));
+   if(moves[1]===0)throw Error('Machine B made no moves on chain');
+   if(state.game.reason!==3||state.game.winner!==0||state.aggressor!==0)throw Error(`Expected the caller to muck on chain: reason ${state.game.reason}, winner ${state.game.winner}, aggressor ${state.aggressor}`);
+   if(state.game.holes[1].some(c=>c!==255))throw Error('The mucked cards reached the chain');
+   return {seconds:Math.round((Date.now()-started)/1000),onChainMoves:moves,transactions:await transactionCount(m),payouts:state.payouts,settledBy:'muck',finalStep:state.seq,match:m.manifest.match};
+  }finally{on.tap=null;await vm(1,`sudo -n iptables -D OUTPUT -d ${HOST} -j DROP; true`).catch(()=>{});await cleanUp(m);}
+ },
+ // One command on each machine, and only the code crosses between them.
+ async invite(){
+  on.tap=null;
+  const dir=`~/runs/invite-${Date.now()}`,started=Date.now();
+  const FUND=MATCH_RENT+DEPOSIT+CAN_POST+RENT_MINIMUM+300_000;
+  const stacks=(seat,args)=>`node scripts/stacks.js ${args} --home ${dir}/home --rpc ${DEVNET}`;
+  const homes=[];
+  for(const seat of [0,1]){
+   await vm(seat,`mkdir -p ${dir} && chmod 700 ${dir}`);
+   const {address}=JSON.parse((await vm(seat,stacks(seat,'wallet'))).trim().split('\n').at(-1));
+   homes.push(address);
+   await direct.send([SystemProgram.transfer({fromPubkey:funder.publicKey,toPubkey:new PublicKey(address),lamports:BigInt(FUND)})]);
+  }
+  const returnFunds=async()=>{for(const seat of [0,1])await channel(seat,`sweep ${dir}/home/wallet-keypair.json ${funder.publicKey.toBase58()} ${program}`).catch(error=>log(`sweep: ${error.message}`));};
+  try{
+   await vm(0,`AGENT_STACKS_STALL_SECONDS=120 AGENT_STACKS_POLL_SECONDS=0.25 setsid nohup ${stacks(0,`host --relay ${RELAY} --buy-in 0.001 --big-blind 0.00002 --hands 2 --clock 600 --think 10 --decide '${bot('raise')}'`)} >> ${dir}/out 2>> ${dir}/err < /dev/null & echo started`);
+   const code=await waitFor('the invite code',async()=>{const text=await vm(0,`cat ${dir}/out 2>/dev/null || true`);return text.split('\n').find(l=>l.startsWith('stacks1.'));},120_000);
+   log('the code crossed to machine B');
+   await vm(1,`AGENT_STACKS_STALL_SECONDS=120 AGENT_STACKS_POLL_SECONDS=0.25 setsid nohup ${stacks(1,`join ${code} --yes --decide '${bot('call')}'`)} >> ${dir}/out 2>> ${dir}/err < /dev/null & echo started`);
+   const finish=seat=>waitFor(`machine ${label(seat)} to finish`,async()=>{const lines=(await vm(seat,`cat ${dir}/out 2>/dev/null || true`)).trim().split('\n');const last=lines.at(-1);return last.startsWith('{')?JSON.parse(last):null;},420_000);
+   const [a,b]=await Promise.all([finish(0),finish(1)]);
+   if(a.payouts[0]!==b.payouts[0]||a.payouts[0]+a.payouts[1]!==2*DEPOSIT)throw Error(`Bad payouts: ${a.payouts} and ${b.payouts}`);
+   const count=(await direct.connection.getSignaturesForAddress(new PublicKey(a.match),{limit:200},'confirmed')).filter(s=>!s.err).length;
+   return {seconds:Math.round((Date.now()-started)/1000),hands:a.results.length,payouts:a.payouts,transactions:count,walletsAfter:[a.walletBalance,b.walletBalance],match:a.match};
+  }finally{
+   for(const seat of [0,1]){
+    const text=await vm(seat,`cat ${dir}/err 2>/dev/null || true`).catch(()=>'(VM not reachable)');
+    writeFileSync(join(logs,`invite-${label(seat)}.log`),text);
+    await vm(seat,`pkill -9 -f 'scripts/stacks.j[s]'; true`).catch(()=>{});
+   }
+   await returnFunds();
+  }
+ },
  // Two machines, nothing going wrong.
  async clean(){
   const m=await setup('clean',{hands:2});on.tap=null;

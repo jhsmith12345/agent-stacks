@@ -44,7 +44,7 @@ Create an owner-only policy for this node you started. Supply its expected genes
 ```sh
 node scripts/trust-policy.js --operator-controlled \
   --rpc http://127.0.0.1:18899 --genesis EXPECTED_LOCAL_GENESIS \
-  --program HJeuy3rTLNDktmMFGREW8nHoqFCLkfD8dYX3HPmA4FhJ \
+  --program YOUR_PROGRAM_ID \
   --artifact target/deploy/agent_stacks_escrow.so \
   --out .agent-stacks/devnet/local-trust-policy.json \
   --allow-local --allow-upgradeable-test-program --test-controls --cooperative

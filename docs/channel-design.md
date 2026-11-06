@@ -1,6 +1,6 @@
 # Channel design: off-chain play, on-chain court
 
-**Status: built and played on a local validator, on public devnet and between two VMs, experimental, test funds only, not independently reviewed. Showing and mucking haven't run on public devnet yet.** This replaces "each player runs a validating node" as the plan for safe play with friends and strangers. Results are in the [testing report](testing.md).
+**Status: built and played on a local validator, on public devnet and between two VMs, experimental, test funds only, not independently reviewed.** This replaces "each player runs a validating node" as the plan for safe play with friends and strangers. Results are in the [testing report](testing.md).
 
 ## The idea
 
@@ -156,7 +156,8 @@ Signatures are checked through Solana's Ed25519 program. The contract reads the 
 
 - Independent review of this design and its code.
 - An immutable deployment, with the binary format and build environment settled first.
-- A transport for strangers: matchmaking, and an untrusted relay that can only delay messages.
+- A transport for strangers: matchmaking, and a public untrusted relay that can only delay messages. For now, players need a relay they can both reach, and a code passed privately between them.
+- A trusted deployment for mainnet in `src/channel/deployments.js`, with no upgrade authority. Without one, the software won't put money in.
 - Legal advice, which this document doesn't replace.
 
 More than two players isn't covered. Channels get much harder with more seats.
@@ -166,11 +167,15 @@ More than two players isn't covered. Channels get much harder with more seats.
 - **A lying RPC can start a dispute.** If an agent's sources claim one exists, it stops playing off-chain and posts its newest state, which turns the claim into a real dispute. No funds or cards are at risk, and the hand plays out on chain, but it does cost time and fees. Reading from several sources makes this harder.
 - **An offline player can lose a pot, or more.** A player away for longer than the clock can lose the current pot on a timeout. A player away past a challenge window can also be rolled back to an older state, which only matters if it had agreed to something newer. So the clock has to suit how reliably players stay online.
 - **Restoring old state is dangerous.** An agent restored from an old backup mid-match could sign a second state at some step, and lose its whole stake.
-- **After a missed window, an agent may not be able to continue.** If it has to fall back to an older state and would decide differently at some step, it refuses to sign, and then times out. That loses the pot rather than risking the stake.
+- **A move signed before a missed window still stands.** If an agent has to fall back to an older state, it repeats the steps it already signed, even if its decision program would now choose differently, because signing anything else forfeits the stake. If a step it signed no longer fits the state it fell back to, it refuses to sign and then times out, which loses the pot rather than risking the stake.
 - **A relay can read betting and revealed shares.** Nothing a relay sees can decrypt a hidden card, but it does see the betting.
 - **A short clock can lose to a slow connection.** On the rate-limited public RPC, a 45-second clock was too short for an agent to catch up and reply on chain. Use a clock of at least several minutes, and longer for players who may drop offline.
 
 ## Running it
+
+[Connecting your agent](connect-your-agent.md) covers the normal way: one command each, with your own program making the decisions. An invite holds the match's terms and a secret the relay never sees, which seals the handshake, so a relay can't slip in another player or other terms. It can't choose the contract: each player checks the deployed bytes against `src/channel/deployments.js` before any money moves.
+
+The parts underneath can also be run separately:
 
 ```bash
 npm run solana:build:channel
@@ -180,6 +185,6 @@ npm run solana:build:channel
 npm run channel:relay -- 8787
 ```
 
-`scripts/channel.js` sets up a match: a `session` key for each player, an `offer` from the joiner, then `create` and `join`. Each player then runs `examples/channel-agent.js` with their session key, the manifest, the relay and one or more RPC URLs. `sweep` returns what's left in a session key, and `retire` reclaims the match's rent. Set `AGENT_STACKS_ALLOW_LOCAL=1` for a local validator.
+`scripts/channel.js` sets up a match by hand: a `session` key for each player, an `offer` from the joiner, then `create` and `join`. Each player then runs `examples/channel-agent.js` with their session key, the manifest, the relay and one or more RPC URLs. `sweep` returns what's left in a session key, and `retire` reclaims the match's rent. Set `AGENT_STACKS_ALLOW_LOCAL=1` for a local validator.
 
 `scripts/channel-rehearsal.js` plays real matches with real agent processes against a validator, and runs the attacks below. `scripts/channel-vm-rehearsal.js` plays matches between two Lima VMs on public devnet, with crash, power-cut and network faults.

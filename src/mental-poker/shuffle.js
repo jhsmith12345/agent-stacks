@@ -3,7 +3,7 @@ import { point, randomScalar, scalar, scalarHex, F, contextString } from './grou
 import { decodeCipher, encodeCipher, reencrypt } from './deck.js';
 export const SHUFFLE_ROUNDS = 128;
 export const SHUFFLE_PROTOCOL = 'agent-stacks/elgamal-cut-and-choose/v2';
-function permutation(n) {
+export function permutation(n) {
   const p = Array.from({ length: n }, (_, i) => i);
   for (let i = n - 1; i > 0; i--) { const j = randomInt(i + 1); [p[i], p[j]] = [p[j], p[i]]; }
   return p;

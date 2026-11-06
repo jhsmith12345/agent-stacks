@@ -4,9 +4,28 @@
 
 These test the [channel design](channel-design.md), where agents play through signed messages and the contract only settles disputes. Each player's agent runs as its own process, and they share only a manifest and a relay. Everything below uses test funds, ran on one Mac (some of it in two VMs), and hasn't been independently reviewed.
 
-The current channel-only build is `9ccfb8c5ab7684d4c23f489b26d4f30a399e55069a1520e6862ce399887f25b1`, 180,744 bytes. Showing and mucking changed the state format, so the program deployed for the runs below can't play those rules. Deploying the new build takes about 0.92 test SOL.
+The current channel-only build is `9ccfb8c5ab7684d4c23f489b26d4f30a399e55069a1520e6862ce399887f25b1`, 180,744 bytes. It's deployed on devnet at `DrUx4PvwUpW1mHPqhDM7Stabtx6JSyXycvtaZftGP1g4`, and the bytes dumped from chain match that hash. It's upgradeable by the project's devnet key, and the deploy took about 0.92 test SOL.
 
-### Public devnet, 2026-11-05
+Showing and mucking changed the state format, so the earlier channel program, `GQkM4Uo4hPx8qL4UqkaoA8CZDUGR9GgvZxBaN46UNEGd`, can't run these rules. The first devnet program, `HJeuy3rTLNDktmMFGREW8nHoqFCLkfD8dYX3HPmA4FhJ`, was closed on 2026-11-05 to pay for this deploy, which returned 0.9487 test SOL. Its match account stays on chain, and its transactions stay readable until devnet prunes them, but the [first public devnet run](#first-public-devnet-run) can no longer be repeated against it.
+
+### Two VMs, public devnet, current rules, 2026-11-05
+
+`scripts/channel-vm-rehearsal.js` plays between two Lima VMs running Alpine Linux, each with its own kernel, disk and keys, and no shared folders. The relay runs on the host. Every match here was on `DrUx4Pvw…`.
+
+| Drill | What happens | Result |
+| --- | --- | --- |
+| Clean, 2 hands | Nothing goes wrong | 61 seconds, 3 transactions |
+| Crash | `kill -9` of B's agent mid-hand, then a restart | 61 seconds, 3 transactions, no dispute |
+| Power cut | B's VM is forced off mid-hand, and boots again 35 seconds later | 89 seconds, 3 transactions, no dispute |
+| Network cut | B's firewall drops the relay's packets, on a 120-second clock | Both agents finish on chain: 12 moves each, 29 transactions, 281 seconds. Neither loses on the clock |
+| Gone for good | B's VM is forced off and stays off, on a 30-second clock | A is paid 127 seconds later, and B loses 10,000 of 1,000,000 lamports |
+| Real bets, 4 hands | A bets every street and B calls, showing only a winner | 142 seconds, 16 raises, 3 transactions. B showed 3 hands and mucked 1 |
+| Real bets, network cut | The same, with B cut off mid-hand and set to muck | 25 moves on chain, 29 transactions, 369 seconds. The contract accepted B's muck, and paid A 1,100,000 and B 900,000 lamports |
+| Invite | One command on each VM, and only the code crosses between them | 122 seconds for 2 hands, 4 transactions including the retire. Besides the stake, the host lost 720,880 lamports and the guest 25,000 |
+
+The host's loss is the permanent tombstone at the match's address plus fees.
+
+### Public devnet, earlier build, 2026-11-05
 
 Program `GQkM4Uo4hPx8qL4UqkaoA8CZDUGR9GgvZxBaN46UNEGd`, the channel-only build. Bytes dumped from chain matched `e0a2d27106d29706a393ac2a5ffa732d263ba39828b35470de66a5b2433b5a62`. It's upgradeable, with the project payer as authority, so it isn't trustless yet. Deploying took 16 seconds and 0.9075 test SOL.
 
@@ -17,9 +36,9 @@ Program `GQkM4Uo4hPx8qL4UqkaoA8CZDUGR9GgvZxBaN46UNEGd`, the channel-only build. 
 
 After retiring the match and sweeping session keys, each run's net cost was about 0.0008 SOL, nearly all of it the permanent tombstone on the match address.
 
-### Two VMs, public devnet, 2026-11-05
+### Two VMs, public devnet, earlier build, 2026-11-05
 
-`scripts/channel-vm-rehearsal.js` plays between two Lima VMs running Alpine Linux, each with its own kernel, disk and keys, and no shared folders. Each VM generated its own keys, and only the offer and manifest crossed between them. The relay ran on the host, and all 36 channel tests that existed then also passed inside a VM. This used the deployed build above, so it predates showing and mucking.
+The first round of VM drills, on the earlier build. Each VM generated its own keys, and only the offer and manifest crossed between them. All 36 channel tests that existed then also passed inside a VM. This predates showing and mucking.
 
 | Drill | What happens | Result |
 | --- | --- | --- |
@@ -43,13 +62,21 @@ Two earlier power-cut runs also played out the long way: each agent waited out a
 | Stale | A player posts its old state 1 | The other answers with state 4 and wins the dispute |
 | Fork | A player signs two states at one step | The forger forfeits the whole escrow |
 | Lying RPC | The audit's card-leak attack (AS-03): the RPC says showdown is due | No hole-card share is released, and no transaction is broadcast |
+| Real bets | 8 hands, one agent betting every street and the other calling, with separate decision programs | About 240 seconds, 32 raises, 3 transactions. Over two runs the caller mucked 11 hands and showed 5. For the first run, recomputing every hand from the saved state confirmed each muck was a real loser and the shown hand a real tie |
+| All-in | One agent shoves and the other calls | The all-in shows first and the board runs out. It ended with a muck, in 3 transactions |
+| Real bets on chain | The relay dies mid-hand, and the caller is set to muck | 22 on-chain moves, 27 transactions. The contract accepted the muck, and the mucked cards aren't on chain |
+| Bad decision programs | One takes 1.5 seconds per decision, one only prints rubbish, and one won't start | Every match settled in 3 transactions, with no dispute. The last two folded on the safe default |
+| Invite | One command each, and only the code crosses between them | Payouts agree, and besides the stake the host lost only fees and the tombstone (961,560 lamports, 946,560 of it the tombstone) and the guest 25,000 |
+| Invite, crash | The guest is killed mid-hand, and `resume` carries on with the same code | The match finishes, with both reporting the same result |
+| Invite, bad contract | The guest's software trusts different bytes, or a different address, or nobody confirms the terms | Refused each time: not a lamport moved, and the host heard nothing |
 
 The older path needed 57 minutes and about 2,900 transactions for 2 hands in its [rehearsal](#two-machine-devnet-rehearsal).
 
 ### Automated checks
 
 - **Engine against contract:** 600 random betting games and 3,000 hand rankings match byte for byte, including illegal moves. A whole hand with real keys, shuffles and proofs matches at every step in the SBF VM.
-- **Tests:** 35 for the contract in the VM, also run against the channel-only build. 49 for the agent and its dispute decisions.
+- **Tests:** 35 for the contract in the VM, also run against the channel-only build. 49 for the agent and its dispute decisions, 38 for connecting a decision program, 11 for the invite, and 2 for the fairness of the deal.
+- **Fair deal:** across 52,000 shuffles every card is equally likely in every position, and across 30,000 deals dealt the way a match deals them neither seat wins more often and ties come up at about the real hold'em rate. Both run on every test pass, with limits six standard deviations out. This checks the shuffle and hand ranking, not the mental-poker encryption around them.
 - **Compute:** at most 97,988 units for a share move and 7,069 for a betting move.
 
 Mutation checks break one rule at a time in a scratch copy and confirm a test fails. These aren't in CI, and the scripts stayed in a scratch directory.
@@ -59,8 +86,9 @@ Mutation checks break one rule at a time in a scratch copy and confirm a test fa
 | Contract | 65 of 67 | Claiming a held payout twice: the Solana runtime separately refuses to take an account below its rent minimum. Mucking before showdown: the contract's phase check also stops it |
 | Agent | 31 of 32 | Co-signing with its own move pending: the one-signature-per-step rule also stops it |
 | Dispute decisions | 16 of 16 | |
+| Decision programs and invites | 72 of 74 | An answer meant for an earlier question: the check that asks the question also stops it. Offering a raise after already acting: heads-up play can't reach that state, because the only raise that doesn't reopen the betting is an all-in, which leaves nobody to raise against |
 
-The first mutation runs caught only about half: 32 of 48 in the contract and 11 of 22 in the agent. Most misses were tests failing for the wrong reason. The rollback test, for example, used bad signatures, so it passed even with the window rule removed. Those tests were rewritten.
+The first mutation runs caught only about half: 32 of 48 in the contract and 11 of 22 in the agent. Most misses were tests failing for the wrong reason. The rollback test, for example, used bad signatures, so it passed even with the window rule removed. Those tests were rewritten. The first run on decision programs and invites caught 62 of 72, and most of those misses got better tests too. The `stacks` command itself isn't under mutation: its checks are covered by the invite scenarios above.
 
 ### Faults found by this work
 
@@ -81,11 +109,20 @@ The VM drills then found these, none of which showed up with both agents on one 
 - **A power cut emptied the manifest and the lock file.** The agent now keeps a durable copy of the terms, flushes its lock to disk, and takes over a lock only when its holder is provably gone.
 - **A session key without enough SOL couldn't post a state, so it couldn't defend its player.** Setup now refuses a reserve too small for that, unless overridden.
 
+Playing with real decisions then found these:
+
+- **Agents bounced acknowledgements back and forth forever.** A resent acknowledgement got one in reply, which got another, and each 5-second resend added one more. Matches moved fast enough to hide it, but a slow agent would have flooded the relay. A reply is now marked, and a marked reply gets no answer.
+- **A deposit could become unrecoverable.** `channel.js create` saved the manifest, which holds the nonce, only after the transaction. A crash in between would have left a deposit with no way to find its address. It's now saved first.
+- **A decision program could leave an agent unable to continue after a rollback.** If it fell back to an older state and the program answered differently, the agent couldn't sign. It now repeats the steps it already signed.
+- **An invite could have pointed at any contract,** which a bad host could use to keep a guest's deposit. This was caught in design, before any code. Each player now checks the deployed bytes against a table in the software before paying.
+- **A decider with no `tell` method hung the runner.** An optional call skipped the increment inside its own argument, so the loop never ended. Only a test double could hit this, and a test found it.
+- **The first help text said all but the stake and small fees comes back.** The host also leaves a permanent tombstone of about 0.001 SOL, and the text now says so.
+
 ### What this doesn't show
 
 - It hasn't run on two physical machines. Two VMs on one Mac share a host, a network path and a clock source.
-- Showing and mucking haven't run on public devnet or between the VMs, only on a local validator and in the contract's tests.
-- The relay has no matchmaking, and hasn't faced the public internet.
+- No real agent has played. Every match used the simple styles in `examples/decision-bot.js`, and no language model or person has used the interface or the invite.
+- The relay has no matchmaking, and hasn't faced the public internet. There's no public relay yet.
 - The deployed program is upgradeable, so the "deployer" row in the design doesn't hold yet.
 - Nobody independent has reviewed this design or code.
 - A hand plays out on chain only in tests and rehearsals, and the timeout-as-fold incentive argument is new.

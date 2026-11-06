@@ -2,10 +2,12 @@
 // attacks them. Local test funds only. It prints one JSON summary and writes each scenario's working files
 // under the directory given.
 // Usage: AGENT_STACKS_ALLOW_LOCAL=1 node scripts/channel-rehearsal.js RPC PROGRAM_ID FUNDER_KEYPAIR WORK_DIRECTORY [SCENARIO...]
+// The invite scenarios check the deployed program against target/deploy-channel, or AGENT_STACKS_PROGRAM_SO.
 import {spawn} from 'node:child_process';
+import {createHash} from 'node:crypto';
 import {createServer} from 'node:http';
 import {once} from 'node:events';
-import {mkdirSync,readFileSync,writeFileSync} from 'node:fs';
+import {mkdirSync,readdirSync,readFileSync,writeFileSync} from 'node:fs';
 import {resolve,join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {setTimeout as pause} from 'node:timers/promises';
@@ -15,6 +17,7 @@ import {ChannelChain,withBytes,COMPLETE} from '../src/channel/chain.js';
 import {startRelay} from '../src/channel/relay.js';
 import {KIND_HAND,sha256,signedMessage} from '../src/channel/engine.js';
 import {toHex} from '../src/channel/wire.js';
+import {decodeInvite} from '../src/channel/invite.js';
 const [rpc,program,funderFile,workArg,...only]=process.argv.slice(2);
 if(!rpc||!program||!funderFile||!workArg)throw Error('Usage: node scripts/channel-rehearsal.js RPC PROGRAM_ID FUNDER_KEYPAIR WORK_DIRECTORY [SCENARIO...]');
 const root=fileURLToPath(new URL('..',import.meta.url)),work=resolve(workArg);
@@ -43,9 +46,10 @@ async function setup(name,{hands=1,seconds=30,buyIn=1_000_000,bigBlind=20_000}={
  const manifest=JSON.parse(readFileSync(file('manifest.json'),'utf8'));
  return {name,dir,file,wallets,sessions,manifest,config:withBytes(manifest),before:await Promise.all(wallets.map(w=>lamports(w.publicKey)))};
 }
-function agent(m,seat,relayUrl,{rpcUrl=rpc,stall=20,poll=POLL}={}){
+const bot=(...args)=>`${JSON.stringify(process.execPath)} examples/decision-bot.js ${args.join(' ')}`;
+function agent(m,seat,relayUrl,{rpcUrl=rpc,stall=20,poll=POLL,decide=null,think=10}={}){
  const label=seat===0?'a':'b';
- const child=spawn(process.execPath,[join(root,'examples/channel-agent.js'),m.file(`session-${label}.json`),m.file(`state-${label}`),'--manifest',m.file('manifest.json'),'--relay',relayUrl,'--rpc',rpcUrl],{cwd:root,env:{...ENV,AGENT_STACKS_STALL_SECONDS:String(stall),AGENT_STACKS_POLL_SECONDS:String(poll)},stdio:['ignore','pipe','pipe']});
+ const child=spawn(process.execPath,[join(root,'examples/channel-agent.js'),m.file(`session-${label}.json`),m.file(`state-${label}`),'--manifest',m.file('manifest.json'),'--relay',relayUrl,'--rpc',rpcUrl,...(decide?['--decide',decide,'--think',String(think)]:[])],{cwd:root,env:{...ENV,AGENT_STACKS_STALL_SECONDS:String(stall),AGENT_STACKS_POLL_SECONDS:String(poll)},stdio:['ignore','pipe','pipe']});
  const a={child,out:'',err:'',exit:null,seat};
  child.stdout.on('data',d=>{a.out+=d;});child.stderr.on('data',d=>{a.err+=d;});
  a.done=new Promise(done=>child.on('exit',(code,signal)=>{a.exit={code,signal};done(a.exit);}));
@@ -63,7 +67,51 @@ async function matchTransactions(m){const list=await direct.connection.getSignat
 const delta=async m=>Promise.all(m.wallets.map(async(w,i)=>await lamports(w.publicKey)-m.before[i]));
 function assert(ok,message){if(!ok)throw Error(`Check failed: ${message}`);}
 const stop=(...agents)=>{for(const a of agents)if(a.exit===null)a.child.kill('SIGKILL');};
+const finalOf=a=>JSON.parse(a.out.trim().split('\n').at(-1));
+// What each player recorded has to agree, hand by hand, with each other and with the contract.
+function checkResults(m,state,agents){
+ const records=agents.map(a=>finalOf(a).results);
+ assert(records[0].length>0&&records[0].length===records[1].length,`both record every hand: ${records.map(r=>r.length)}`);
+ records[0].forEach((r,i)=>{
+  const o=records[1][i];
+  for(const field of ['hand','winner','reason','aggressor','firstToShow'])assert(r[field]===o[field],`hand ${r.hand}: both agree on ${field}`);
+  assert(r.stacks[0]===o.stacks[0]&&r.stacks[1]===o.stacks[1],`hand ${r.hand}: both agree on the stacks`);
+  assert(r.stacks[0]+r.stacks[1]===2*m.manifest.buyIn,`hand ${r.hand}: nothing is created or lost`);
+ });
+ const last=records[0].at(-1);
+ assert(state.payouts[0]===last.stacks[0]&&state.payouts[1]===last.stacks[1],`the contract paid what the last hand left: ${state.payouts} and ${last.stacks}`);
+ return records[0];
+}
+const raises=r=>r.betting.filter(e=>e.action===3||e.action===4).length;
 
+// The one-command way in, as two people would use it. Only the code passes between them.
+const ARTIFACT=resolve(process.env.AGENT_STACKS_PROGRAM_SO??join(root,'target/deploy-channel/agent_stacks_escrow.so'));
+function stacks(dir,home,args,{extraEnv={}}={}){
+ const child=spawn(process.execPath,[join(root,'scripts/stacks.js'),...args,'--home',join(dir,home),'--rpc',rpc,'--deployment',join(dir,'deployment.json')],{cwd:root,env:{...ENV,AGENT_STACKS_STALL_SECONDS:'20',AGENT_STACKS_POLL_SECONDS:String(POLL),...extraEnv},stdio:['ignore','pipe','pipe']});
+ const p={child,out:'',err:'',exit:null};
+ child.stdout.on('data',d=>{p.out+=d;});child.stderr.on('data',d=>{p.err+=d;});
+ p.done=new Promise(done=>child.on('exit',(code,signal)=>{p.exit={code,signal};done(p.exit);}));
+ return p;
+}
+const lastJson=p=>JSON.parse(p.out.trim().split('\n').at(-1));
+async function inviteSetup(name,{fundEach=1_000_000_000}={}){
+ const dir=join(work,`${name}-${Date.now()}`);mkdirSync(dir,{recursive:true,mode:0o700});
+ const code=readFileSync(ARTIFACT);
+ writeFileSync(join(dir,'deployment.json'),JSON.stringify({program,programBytes:code.length,programSha256:createHash('sha256').update(code).digest('hex'),allowUpgradeable:true}));
+ const wallets=[];
+ for(const home of ['home-a','home-b']){
+  const p=stacks(dir,home,['wallet']);await p.done;
+  assert(p.exit.code===0,`wallet: ${p.err.slice(-300)}`);
+  const {address}=lastJson(p);wallets.push(address);
+  await fund(new PublicKey(address),fundEach);
+ }
+ return {dir,wallets};
+}
+async function hosted(dir,args){
+ const host=stacks(dir,'home-a',['host',...args]);
+ const code=await waitFor('the invite code',async()=>{const line=host.out.split('\n').find(l=>l.startsWith('stacks1.'));if(host.exit&&!line)throw Error(`host exited: ${host.err.slice(-400)}`);return line;},60_000);
+ return {host,code};
+}
 const SCENARIOS={
  // The normal case. The contract should see only a create, a join and a close.
  async clean(){
@@ -113,6 +161,165 @@ const SCENARIOS={
    assert(moves>0,'moves really happened on chain');
    return {seconds:Math.round((Date.now()-started)/1000),onChainMoves:moves,matchTransactions:count,payouts:state.payouts,finalStep:state.seq,settledBy:['fold','showdown','timeout','muck'][state.game.reason],walletChanges:await delta(m)};
   }finally{stop(a,b);relay.close();}
+ },
+ // Real betting across several hands: seat 0 bets every street and seat 1 calls, then shows only a winner.
+ // Whoever got called shows first, so every hand ends with seat 0's cards public, and a loss means a muck.
+ async bets(){
+  const hands=8,m=await setup('bets',{hands,seconds:600});
+  const relay=await startRelay();
+  const started=Date.now(),agents=[agent(m,0,relay.url,{decide:bot('raise')}),agent(m,1,relay.url,{decide:bot('call')})];
+  try{
+   const exits=await withTimeout(Promise.all(agents.map(a=>a.done)),480_000,'betting match');
+   assert(exits.every(e=>e.code===0),`agents exited ${JSON.stringify(exits)}: ${agents.map(a=>a.err.slice(-300)).join(' | ')}`);
+   const state=await settled(m),records=checkResults(m,state,agents),count=await matchTransactions(m);
+   for(const r of records){
+    assert(raises(r)>=4,`hand ${r.hand}: seat 0 bet every street, ${raises(r)} raises`);
+    assert(r.aggressor===0&&r.firstToShow===0,`hand ${r.hand}: the player who got called shows first`);
+    assert(r.reason===1||r.reason===3,`hand ${r.hand}: it reached the end, reason ${r.reason}`);
+   }
+   const mucks=records.filter(r=>r.reason===3),shown=records.filter(r=>r.reason===1);
+   assert(mucks.length>0&&shown.length>0,`saw both endings: ${mucks.length} mucks, ${shown.length} shown`);
+   for(const r of mucks)assert(r.opponentCards.length===0&&r.winner===0,`hand ${r.hand}: a muck hides the caller's cards from seat 0`);
+   assert(count<=4,`a clean match stays off chain, saw ${count} transactions`);
+   assert(agents.every(a=>!a.err.includes('safe default')),'no decision fell back to the default');
+   return {seconds:Math.round((Date.now()-started)/1000),hands:records.length,raises:records.reduce((n,r)=>n+raises(r),0),mucks:mucks.length,shown:shown.length,matchTransactions:count,payouts:state.payouts,walletChanges:await delta(m)};
+  }finally{stop(...agents);relay.close();}
+ },
+ // An all-in that gets called: the board runs out, and the player who got called shows first.
+ async allin(){
+  const m=await setup('allin',{hands:3,seconds:600});
+  const relay=await startRelay();
+  const agents=[agent(m,0,relay.url,{decide:bot('shove')}),agent(m,1,relay.url,{decide:bot('call')})];
+  try{
+   const exits=await withTimeout(Promise.all(agents.map(a=>a.done)),300_000,'all-in match');
+   assert(exits.every(e=>e.code===0),`agents exited ${JSON.stringify(exits)}: ${agents.map(a=>a.err.slice(-300)).join(' | ')}`);
+   const state=await settled(m),records=checkResults(m,state,agents);
+   for(const r of records){
+    assert(r.aggressor===0&&r.firstToShow===0,`hand ${r.hand}: the all-in shows first`);
+    assert(r.board.length===5,`hand ${r.hand}: the board ran out`);
+   }
+   return {hands:records.length,endings:records.map(r=>['fold','showdown','forfeit','muck'][r.reason]),payouts:state.payouts,matchTransactions:await matchTransactions(m)};
+  }finally{stop(...agents);relay.close();}
+ },
+ // The relay cuts out with real money in the pot, and the caller mucks on chain. The contract itself decides
+ // whether that's allowed, so this is the rule for who shows first, enforced for real after a real bet.
+ async betsonchain(){
+  const m=await setup('betsonchain',{seconds:60});
+  let cut=false,seen=0;
+  const relay=await startRelay({tap:(seat,body)=>{seen++;if(seen>24)cut=true;return cut?[]:[body];}});
+  const a=agent(m,0,relay.url,{stall:20,decide:bot('raise')}),b=agent(m,1,relay.url,{stall:20,decide:bot('call','--show','never')});
+  const started=Date.now();
+  try{
+   const exits=await withTimeout(Promise.all([a.done,b.done]),480_000,'betting on chain');
+   assert(exits.every(e=>e.code===0),`agents exited ${JSON.stringify(exits)}: ${a.err.slice(-300)} | ${b.err.slice(-300)}`);
+   const state=await settled(m),count=await matchTransactions(m);
+   assert(cut,'the relay really did cut out');
+   const moves=[a,b].flatMap(x=>x.err.split('\n').filter(l=>l.includes('on-chain move'))).length;
+   assert(moves>0,'moves really happened on chain');
+   assert(state.game.reason===3&&state.game.winner===0,`the caller mucked on chain, reason ${state.game.reason}, winner ${state.game.winner}`);
+   assert(state.aggressor===0,'the contract recorded who got called');
+   assert(state.payouts[0]>m.manifest.buyIn+20_000,`seat 0 won a pot with real bets in it: ${state.payouts}`);
+   assert(state.game.holes[1].every(c=>c===255),'the mucked cards are not on chain');
+   return {seconds:Math.round((Date.now()-started)/1000),onChainMoves:moves,matchTransactions:count,payouts:state.payouts,settledBy:'muck',walletChanges:await delta(m)};
+  }finally{stop(a,b);relay.close();}
+ },
+ // A decision program that's slow, talks nonsense, or won't start. The match still ends, and fairly.
+ async badbots(){
+  const results={};
+  for(const [name,decide,think,check] of [
+   ['slow',bot('call','--delay','1500'),10,r=>r.reason!==0],
+   ['nonsense',`${JSON.stringify(process.execPath)} -e "process.stdin.on('data',()=>console.log('rubbish'))"`,1,r=>r.reason===0],
+   ['missing','/no/such/program',10,r=>r.reason===0],
+  ]){
+   const m=await setup(`badbot-${name}`,{seconds:600});
+   const relay=await startRelay();
+   const agents=[agent(m,0,relay.url,{decide:bot('raise')}),agent(m,1,relay.url,{decide,think})];
+   try{
+    const exits=await withTimeout(Promise.all(agents.map(a=>a.done)),240_000,`${name} program`);
+    assert(exits.every(e=>e.code===0),`${name}: agents exited ${JSON.stringify(exits)}: ${agents.map(a=>a.err.slice(-300)).join(' | ')}`);
+    const state=await settled(m),[r]=checkResults(m,state,agents),count=await matchTransactions(m);
+    assert(check(r),`${name}: ended by ${r.reason}`);
+    assert(count<=4,`${name}: no dispute came of it, saw ${count} transactions`);
+    results[name]={ending:['fold','showdown','forfeit','muck'][r.reason],payouts:state.payouts};
+   }finally{stop(...agents);relay.close();}
+  }
+  return results;
+ },
+ // Two players, one command each, real betting. Everything but the stake and small fees comes back.
+ async invite(){
+  const {dir,wallets}=await inviteSetup('invite');
+  const relay=await startRelay();
+  let host,guest;
+  try{
+   ({host}=await hosted(dir,['--relay',relay.url,'--buy-in','0.001','--big-blind','0.00002','--hands','3','--clock','600','--think','10','--decide',bot('raise')]));
+   const code=host.out.split('\n').find(l=>l.startsWith('stacks1.'));
+   guest=stacks(dir,'home-b',['join',code,'--yes','--decide',bot('call')]);
+   const exits=await withTimeout(Promise.all([host.done,guest.done]),300_000,'invited match');
+   assert(exits.every(e=>e.code===0),`exited ${JSON.stringify(exits)}: ${host.err.slice(-400)} | ${guest.err.slice(-400)}`);
+   const [a,b]=[lastJson(host),lastJson(guest)];
+   assert(a.payouts[0]===b.payouts[0]&&a.payouts[1]===b.payouts[1],'both report the same result');
+   assert(a.payouts[0]+a.payouts[1]===2_000_000,'nothing is created or lost');
+   assert(a.results.length>=1&&a.results.every(r=>r.betting.length>0),'real hands were played');
+   const balances=await Promise.all(wallets.map(lamports));
+   const spent=balances.map((balance,i)=>1_000_000_000-1_000_000+[a,b][i].payouts[i]-balance);
+   // The contract keeps a tombstone at the match's address for good, so it can't be reused. The host pays that.
+   const tombstone=Number(await direct.connection.getMinimumBalanceForRentExemption(8));
+   assert(spent[0]>=tombstone&&spent[0]<tombstone+100_000,`the host lost only fees and the tombstone (${tombstone}): ${spent[0]}`);
+   assert(spent[1]>=0&&spent[1]<100_000,`the guest lost only fees: ${spent[1]}`);
+   const list=await direct.connection.getSignaturesForAddress(new PublicKey(a.match),{limit:100},'confirmed');
+   const count=list.filter(s=>!s.err).length;
+   assert(count<=4,`a clean match stays off chain, saw ${count} transactions`);
+   return {hands:a.results.length,payouts:a.payouts,lostBesidesTheStake:spent,tombstone,matchTransactions:count};
+  }finally{for(const p of [host,guest])if(p&&p.exit===null)p.child.kill('SIGKILL');relay.close();}
+ },
+ // The guest's machine crashes mid-match. The same code picks it up again, and asks nothing twice.
+ async inviteresume(){
+  const {dir}=await inviteSetup('inviteresume');
+  const relay=await startRelay();
+  let host,guest,again;
+  try{
+   ({host}=await hosted(dir,['--relay',relay.url,'--buy-in','0.001','--hands','2','--clock','600','--think','10','--decide',bot('call')]));
+   const code=host.out.split('\n').find(l=>l.startsWith('stacks1.'));
+   guest=stacks(dir,'home-b',['join',code,'--yes','--decide',bot('call')]);
+   const stateFile=()=>{const id=readdirSync(join(dir,'home-b')).find(n=>!n.endsWith('.json'));return id?join(dir,'home-b',id,'state'):null;};
+   await waitFor('a hand under way',async()=>{try{const d=stateFile();const f=d&&readdirSync(d).find(n=>n.endsWith('.state.json'));return f&&JSON.parse(readFileSync(join(d,f),'utf8')).latest?.seq>=4;}catch{return false;}});
+   guest.child.kill('SIGKILL');await guest.done;log('killed the guest mid-hand');
+   await pause(2000);
+   // No --yes this time: it has already accepted these terms.
+   again=stacks(dir,'home-b',['resume',code,'--decide',bot('call')]);
+   const exits=await withTimeout(Promise.all([host.done,again.done]),300_000,'match after the crash');
+   assert(exits.every(e=>e.code===0),`exited ${JSON.stringify(exits)}: ${host.err.slice(-400)} | ${again.err.slice(-400)}`);
+   const [a,b]=[lastJson(host),lastJson(again)];
+   assert(a.payouts[0]===b.payouts[0],'both report the same result');
+   return {payouts:a.payouts,hands:a.results.length};
+  }finally{for(const p of [host,guest,again])if(p&&p.exit===null)p.child.kill('SIGKILL');relay.close();}
+ },
+ // A code that points at a contract this player doesn't trust. No money moves, and nothing is offered.
+ async invitebadcontract(){
+  const {dir,wallets}=await inviteSetup('invitebadcontract');
+  const relay=await startRelay();
+  let host;
+  try{
+   ({host}=await hosted(dir,['--relay',relay.url,'--buy-in','0.001','--think','10']));
+   const code=host.out.split('\n').find(l=>l.startsWith('stacks1.'));
+   const before=await lamports(wallets[1]);
+   // This player's software trusts a different build at this address, as if the contract had been swapped.
+   const honest=JSON.parse(readFileSync(join(dir,'deployment.json'),'utf8'));
+   writeFileSync(join(dir,'deployment.json'),JSON.stringify({...honest,programSha256:'00'.repeat(32)}));
+   const wrongCode=stacks(dir,'home-b',['join',code,'--yes']);await wrongCode.done;
+   assert(wrongCode.exit.code!==0&&/differs from pinned/.test(wrongCode.err),`refused swapped code: ${wrongCode.err.slice(-300)}`);
+   // And a different address altogether.
+   writeFileSync(join(dir,'deployment.json'),JSON.stringify({...honest,program:'11111111111111111111111111111112'}));
+   const wrongAddress=stacks(dir,'home-b',['join',code,'--yes']);await wrongAddress.done;
+   assert(wrongAddress.exit.code!==0,'refused another address');
+   writeFileSync(join(dir,'deployment.json'),JSON.stringify(honest));
+   // With terms it hasn't seen, and nobody at a keyboard, it won't guess.
+   const unattended=stacks(dir,'home-b',['join',code]);await unattended.done;
+   assert(unattended.exit.code!==0&&/--yes/.test(unattended.err),`refused without consent: ${unattended.err.slice(-300)}`);
+   assert(await lamports(wallets[1])===before,'not a lamport moved');
+   assert((relay.boxes.get(`${decodeInvite(code).id}/0`)?.length??0)===0,'and the host heard nothing');
+   return {refused:true};
+  }finally{if(host&&host.exit===null)host.child.kill('SIGKILL');relay.close();}
  },
  // A player posts an old state hoping the other is asleep. The other's newest state must win.
  async stale(){

@@ -8,7 +8,7 @@ import {shuffleAndProve,encodeShuffle,decodeShuffle,verifyShuffle} from '../ment
 import {mul,point,scalar} from '../mental-poker/group.js';
 import {signMessage,verifySignature} from './keys.js';
 import {fromHex,toHex,encodeDLEQ} from './wire.js';
-import {acceptedHand,applyAction,applyMuck,applyShare,closePayload,decodeHand,encodeHand,evaluate,greater,mayMuck,KIND_CLOSE,KIND_HAND,KIND_STACKS,obligated,owedPositions,P_BETTING,P_DONE,sha256,signedMessage,stacksPayload} from './engine.js';
+import {acceptedHand,applyAction,applyMuck,applyShare,closePayload,decodeHand,encodeHand,evaluate,firstShower,greater,legalMoves,mayMuck,KIND_CLOSE,KIND_HAND,KIND_STACKS,obligated,owedPositions,P_BETTING,P_DONE,sha256,signedMessage,stacksPayload} from './engine.js';
 export const STAGE={KEYS:'keys',SHUFFLE:'shuffle',PLAY:'play',AGREE:'agree',CLOSED:'closed'};
 const MAX_WIRE=1_000_000,MAX_HELD=16;
 const CARD_POINTS=new Map(initialDeck().map((c,i)=>[c.b,i]));
@@ -18,8 +18,10 @@ export class ChannelPeer{
  // config: {program,match,terms,programBytes,matchBytes,termsBytes,sessions:[hex,hex],buyIn,bigBlind,maxHands}
  // `reveal` decides, when this player is second to show, whether to show (true) or muck (false). By
  // default it shows a hand that wins or ties, and mucks one that loses, since showing that gains nothing.
- constructor(config,session,seat,{strategy,store=null,state=null,reveal=null}){
-  this.config=config;this.session=session;this.seat=seat;this.strategy=strategy;this.store=store;this.held=[];this.reveal=reveal;
+ // With `outside`, a separate program makes both of those decisions. Nothing here waits for it: `question`
+ // says what's needed, `answer` hands in the reply, and `resume` carries on.
+ constructor(config,session,seat,{strategy,store=null,state=null,reveal=null,outside=false}){
+  this.config=config;this.session=session;this.seat=seat;this.strategy=strategy;this.store=store;this.held=[];this.reveal=reveal;this.outside=outside;
   this.keys=config.sessions.map(k=>fromHex(k,32));
   if(!this.keys[seat].equals(session.publicKey))throw Error('This session key is not in the match');
   this.binding={program:config.programBytes,match:config.matchBytes,terms:config.termsBytes};
@@ -27,7 +29,7 @@ export class ChannelPeer{
  }
  get opponent(){return 1-this.seat;}
  get state(){return this.st;}
- persist(){if(this.store)this.store.save(this.st);}
+ persist(){this.noteResult();if(this.store)this.store.save(this.st);}
  // Records before anything is sent. A player signs at most one state per step, or forfeits the match.
  sign(kind,seq,payloadHash){
   const hash=toHex(payloadHash),previous=this.st.signed[seq];
@@ -168,11 +170,12 @@ export class ChannelPeer{
   }else if(!known)this.st.theirs[seq]={kind,hash,sig};
  }
  hashOf(m){return fromHex(m.hash,32);}
- // The opponent lost our signature. Sending it again costs nothing and changes nothing.
+ // The opponent lost our signature. Sending it again costs nothing and changes nothing. The reply is marked,
+ // and a marked reply gets no answer, or two agents would bounce acknowledgements between them forever.
  reAck(m){
   const l=this.st.latest;
-  if(!l||l.seq!==m.seq||l.kind!==m.kind||toHex(sha256(fromHex(l.payload)))!==m.hash)return [];
-  return [{type:'ack',seq:l.seq,kind:l.kind,hash:m.hash,sig:l.sigs[this.seat]}];
+  if(m.echo||!l||l.seq!==m.seq||l.kind!==m.kind||toHex(sha256(fromHex(l.payload)))!==m.hash)return [];
+  return [{type:'ack',seq:l.seq,kind:l.kind,hash:m.hash,sig:l.sigs[this.seat],echo:true}];
  }
  onMove(m){
   const st=this.st,other=this.opponent;
@@ -187,6 +190,7 @@ export class ChannelPeer{
   const payload=encodeHand(s);
   if(!sha256(payload).equals(hash))throw Error('Signed state does not match this move');
   const mine=this.sign(KIND_HAND,m.seq,hash);
+  this.remember(other,m.seq,m.step,s);
   st.s=s;this.recordBoth(KIND_HAND,m.seq,payload,mine,sig);
   const ack={type:'ack',seq:m.seq,kind:KIND_HAND,hash:m.hash,sig:toHex(mine)};
   return this.send([ack,...this.next()]);
@@ -223,13 +227,35 @@ export class ChannelPeer{
   const st=this.st;
   if(st.disputed||st.mine||st.stage!==STAGE.PLAY||st.latest?.kind!==KIND_HAND)return [];
   if(st.s.phase===P_DONE)return this.startAgreement();
-  return obligated(st.s)===this.seat?this.moveMessage():[];
+  if(obligated(st.s)!==this.seat||this.question())return [];
+  return this.moveMessage();
+ }
+ // What a separate program has to decide next, or null. Signing a step sets st.mine, so a decision that has
+ // been acted on is never asked again, and a crash before that only means asking again.
+ question(){
+  const st=this.st,s=st.s;
+  if(!this.outside||!s||st.mine||st.decided?.[st.seq+1]||obligated(s)!==this.seat)return null;
+  const key=`${st.hand}/${st.seq}`;
+  if(this.answered?.key===key)return null;
+  if(s.phase===P_BETTING)return {key,type:'bet',view:this.betView(s)};
+  if(mayMuck(s))return {key,type:'show',view:this.showView(s)};
+  return null;
+ }
+ // Null means no usable reply, so the safe default applies. A reply to an earlier question is simply ignored.
+ answer(key,reply){this.answered={key,reply};}
+ reply(){return this.answered?.key===`${this.st.hand}/${this.st.seq}`?this.answered.reply:null;}
+ resume(){
+  const st=this.st,out=this.next();
+  // Any acknowledgement stays ready to resend, in case it was the message that got lost.
+  if(out.length){st.outbox=[...st.outbox.filter(m=>m.type==='ack'),...out];this.persist();}
+  return out;
  }
  // Both players work out the same next state, so there is nothing to negotiate.
  startAgreement(){
   const st=this.st,stacks=st.s.game.stacks,seq=this.expectedSeq();
   const finished=st.hand>=this.config.maxHands||stacks.includes(0);
   const kind=finished?KIND_CLOSE:KIND_STACKS,payload=finished?closePayload(stacks):stacksPayload(st.hand+1,stacks),hash=sha256(payload);
+  this.noteResult();
   const sig=this.sign(kind,seq,hash);
   st.stage=STAGE.AGREE;st.pendingAgreement={payload:toHex(payload),hash:toHex(hash),stacks};
   st.mine={kind,seq,sig:toHex(sig)};
@@ -238,7 +264,7 @@ export class ChannelPeer{
  afterAgreement(kind){
   const st=this.st,stacks=st.pendingAgreement.stacks;st.pendingAgreement=null;
   if(kind===KIND_CLOSE){st.stage=STAGE.CLOSED;st.final=stacks;return [];}
-  st.hand++;st.stacks=[...stacks];st.stage=STAGE.KEYS;st.s=null;st.setup=null;
+  st.hand++;st.stacks=[...stacks];st.stage=STAGE.KEYS;st.s=null;st.setup=null;st.betting=[];st.decided={};
   return this.setupStep();
  }
  // What this player owes, decided once and recorded, so a crash or a dispute can't produce a different answer.
@@ -246,6 +272,7 @@ export class ChannelPeer{
   const st=this.st,seq=st.seq+1,step=this.chooseStep();
   const s=clone(st.s);this.applyStep(s,this.seat,step);
   const payload=encodeHand(s),hash=sha256(payload),sig=this.sign(KIND_HAND,seq,hash);
+  this.remember(this.seat,seq,step,s);(st.decided??={})[seq]=step;
   st.s=s;st.mine={kind:KIND_HAND,seq,sig:toHex(sig),step};
   return [{type:'move',seq,step,hash:toHex(hash),sig:toHex(sig)}];
  }
@@ -258,15 +285,23 @@ export class ChannelPeer{
   return this.nextStep(s);
  }
  nextStep(s){
+  // Back at a step already signed, after falling back to an older state: it has to be the same step again,
+  // because signing anything else would forfeit the match, and a program may well answer differently.
+  const before=this.st.decided?.[this.st.seq+1];
+  if(before)return clone(before);
   if(s.phase===P_BETTING)return this.chooseAction(s);
   if(mayMuck(s)&&!this.choosesToShow(s))return {muck:true};
   return this.shareStep(s);
  }
- choosesToShow(s){
+ showView(s){
   const cards=this.myCards(s),opponentCards=s.game.holes[this.opponent],board=s.game.board;
   const mine=evaluate([...cards,...board]),theirs=evaluate([...opponentCards,...board]);
-  const view={hand:s.hand,seat:this.seat,cards,opponentCards,board:[...board],winning:greater(mine,theirs),tied:!greater(mine,theirs)&&!greater(theirs,mine),pot:s.game.contributed[0]+s.game.contributed[1]};
+  return {hand:s.hand,hands:this.config.maxHands,seat:this.seat,cards,opponentCards,board:[...board],winning:greater(mine,theirs),tied:!greater(mine,theirs)&&!greater(theirs,mine),pot:s.game.contributed[0]+s.game.contributed[1]};
+ }
+ choosesToShow(s){
+  const view=this.showView(s);
   // A bad answer can only mean showing or mucking, and both are this player's to choose.
+  if(this.outside){const reply=this.reply();return typeof reply==='boolean'?reply:view.winning||view.tied;}
   return this.reveal?!!this.reveal(view):view.winning||view.tied;
  }
  shareStep(s){
@@ -275,16 +310,32 @@ export class ChannelPeer{
   const proof=decryptionShare(this.st.setup.secret,c,context);
   return {logical,wire:toHex(encodeDLEQ(context,proof.publicKey,c.a,proof.share,proof.proof))};
  }
+ betView(s){
+  const g=s.game,seat=this.seat;
+  return {hand:s.hand,hands:this.config.maxHands,seat,cards:this.myCards(s),board:g.board.filter(c=>c<52),stacks:[...g.stacks],bets:[...g.bets],pot:g.contributed[0]+g.contributed[1],currentBet:g.currentBet,minRaise:g.minRaise,bigBlind:g.bigBlind,button:g.button,owed:Math.max(0,g.currentBet-g.bets[seat]),street:g.street,legal:legalMoves(g,seat),history:clone(this.st.betting??[])};
+ }
  chooseAction(s){
-  const g=s.game,seat=this.seat,owed=Math.max(0,g.currentBet-g.bets[seat]);
-  const view={hand:s.hand,seat,cards:this.myCards(s),board:g.board.filter(c=>c<52),stacks:[...g.stacks],bets:[...g.bets],currentBet:g.currentBet,minRaise:g.minRaise,owed,street:g.street};
-  const choice=this.strategy?.(view);
+  const view=this.betView(s),choice=this.outside?this.reply():this.strategy?.(view);
   // A strategy proposes a poker move and nothing else, and a bad one falls back to the safe default.
   if(choice&&Number.isInteger(choice.action)){
-   try{applyAction(clone(s),seat,choice.action,choice.amount??0);return {action:choice.action,amount:choice.amount??0};}
-   catch(error){if(!error.invalidMove)throw error;}
+   try{applyAction(clone(s),this.seat,choice.action,choice.amount??0);return {action:choice.action,amount:choice.amount??0};}
+   catch(error){if(!error.invalidMove)throw error;this.overruled=error.message;}
   }
-  return {action:owed>0?0:1,amount:0};
+  return {action:view.owed>0?0:1,amount:0};
+ }
+ // The betting so far this hand, for whoever is deciding. Nothing signed or checked depends on it.
+ remember(seat,seq,step,after){
+  if(step.action===undefined)return;
+  const raised=step.action===3||step.action===4;
+  (this.st.betting??=[]).push({seq,street:this.st.s.game.street,seat,action:step.action,...(raised?{to:after.game.currentBet}:{})});
+ }
+ // How each finished hand went. It's only a record, so a failure here must never get in the way of play.
+ noteResult(){
+  const st=this.st,s=st.s;
+  if(s?.phase!==P_DONE||(st.results??=[]).some(r=>r.hand===st.hand))return;
+  const g=s.game;let cards=null;
+  try{cards=this.myCards(s);}catch{}
+  st.results.push({hand:st.hand,winner:g.winner,reason:g.reason,stacks:[...g.stacks],seat:this.seat,cards,opponentCards:g.holes[this.opponent].filter(c=>c<52),board:g.board.filter(c=>c<52),aggressor:s.aggressor,firstToShow:firstShower(s),betting:clone(st.betting??[])});
  }
  myCards(s){
   const logicals=this.seat===0?[0,2]:[1,3],secret=scalar(this.st.setup.secret,true);
@@ -306,6 +357,8 @@ export class ChannelPeer{
   const st=this.st,hash=toHex(sha256(payload)),signed=st.signed[seq];
   if(!signed||signed.kind!==KIND_HAND||signed.hash!==hash)throw Error('The chain shows a state this agent never signed');
   st.s=decodeHand(payload);st.seq=seq;st.mine=null;
+  // Rolled back, so anything after this step never happened.
+  if(st.betting)st.betting=st.betting.filter(e=>e.seq<=seq);
   this.persist();
  }
  // The next on-chain move, using the same step already signed off-chain if there was one. Signing
@@ -317,9 +370,11 @@ export class ChannelPeer{
   }else{
    if(st.seq!==chainSeq)throw Error('Local state is not at the chain’s step');
    if(obligated(st.s)!==this.seat)throw Error('This agent owes nothing now');
+   if(this.question())throw Error('A decision is still due at this step');
    const s=clone(st.s),step=this.nextStep(s);
    this.applyStep(s,this.seat,step);
    const sig=this.sign(KIND_HAND,seq,sha256(encodeHand(s)));
+   this.remember(this.seat,seq,step,s);(st.decided??={})[seq]=step;
    st.s=s;st.mine={kind:KIND_HAND,seq,sig:toHex(sig),step};
    this.persist();
   }
@@ -334,6 +389,7 @@ export class ChannelPeer{
   if(!this.verify(other,KIND_HAND,seq,hash,signature))throw Error('Bad signature on an on-chain move');
   this.noteOpponentSignature(seq,KIND_HAND,toHex(hash),toHex(signature));
   const mine=this.sign(KIND_HAND,seq,hash);
+  this.remember(other,seq,step,s);
   st.s=s;this.recordBoth(KIND_HAND,seq,payload,mine,signature);
   this.persist();
  }

@@ -64,6 +64,12 @@ export function act(g,seat,action,amount=0){
  if(action!==3)g.pending&=~(1<<seat);
  g.acted|=1<<seat;g.actor=other;progress(g);
 }
+// What `act` would accept from this seat, for whoever is choosing a move. Amounts are totals for this street.
+export function legalMoves(g,seat){
+ const owed=Math.max(0,g.currentBet-g.bets[seat]),max=g.bets[seat]+g.stacks[seat];
+ const canRaise=!(g.acted&(1<<seat))&&g.stacks[1-seat]>0&&max>g.currentBet;
+ return {fold:true,check:owed===0,call:owed>0?Math.min(owed,g.stacks[seat]):null,raise:canRaise?{min:Math.min(g.currentBet+g.minRaise,max),max}:null,allIn:canRaise||(owed>0&&max<=g.currentBet)?max:null};
+}
 export function resumeBoard(g){
  ensure(g.stage===BOARD&&g.street>=1&&g.street<=3,'Board is not due');
  const required=g.street===1?3:g.street+2;ensure(g.board.slice(0,required).every(c=>c<52),'Board cards missing');

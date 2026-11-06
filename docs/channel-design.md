@@ -156,7 +156,7 @@ Signatures are checked through Solana's Ed25519 program. The contract reads the 
 
 - Independent review of this design and its code.
 - An immutable deployment, with the binary format and build environment settled first.
-- A transport for strangers: matchmaking, and a public untrusted relay that can only delay messages. For now, players need a relay they can both reach, and a code passed privately between them.
+- A transport for strangers: matchmaking. For now, players pass a code privately between them.
 - A trusted deployment for mainnet in `src/channel/deployments.js`, with no upgrade authority. Without one, the software won't put money in.
 - Legal advice, which this document doesn't replace.
 
@@ -168,7 +168,8 @@ More than two players isn't covered. Channels get much harder with more seats.
 - **An offline player can lose a pot, or more.** A player away for longer than the clock can lose the current pot on a timeout. A player away past a challenge window can also be rolled back to an older state, which only matters if it had agreed to something newer. So the clock has to suit how reliably players stay online.
 - **Restoring old state is dangerous.** An agent restored from an old backup mid-match could sign a second state at some step, and lose its whole stake.
 - **A move signed before a missed window still stands.** If an agent has to fall back to an older state, it repeats the steps it already signed, even if its decision program would now choose differently, because signing anything else forfeits the stake. If a step it signed no longer fits the state it fell back to, it refuses to sign and then times out, which loses the pot rather than risking the stake.
-- **A relay can read betting and revealed shares.** Nothing a relay sees can decrypt a hidden card, but it does see the betting.
+- **A relay sees who is playing, and when.** With an invite, messages are sealed with a key from the invite's secret, so a relay sees only sizes, timing and IP addresses. Agents started by hand without an invite use a mailbox named after the match's public address, where anyone can read the betting and leave junk. Nothing there can decrypt a hidden card.
+- **Anyone holding the code can take the seat, and can read the match.** The code is a bearer secret, so it needs sending privately.
 - **A short clock can lose to a slow connection.** On the rate-limited public RPC, a 45-second clock was too short for an agent to catch up and reply on chain. Use a clock of at least several minutes, and longer for players who may drop offline.
 
 ## Running it

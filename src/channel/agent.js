@@ -13,8 +13,9 @@ import {DecisionProgram} from './decider.js';
 import {acceptedManifest} from './manifest.js';
 // `decide` is a command that makes the poker decisions, within `think` seconds each. Without one, this agent
 // only checks and calls. It goes to the chain after `stallSeconds` of silence from the opponent, and that's
-// never less than three times the thinking time, since the opponent may be thinking.
-export async function playMatch({sessionFile,directory:directoryArg,manifestFile,relay,rpcs,decide=null,think=20,stallSeconds=null,pollSeconds=null,allowLocal=false,log:write=text=>process.stderr.write(`${text}\n`)}){
+// never less than three times the thinking time, since the opponent may be thinking. `makeTransport` replaces
+// the plain mailbox named after the match, for players who share a secret.
+export async function playMatch({sessionFile,directory:directoryArg,manifestFile,relay,rpcs,decide=null,think=20,stallSeconds=null,pollSeconds=null,allowLocal=false,makeTransport=null,log:write=text=>process.stderr.write(`${text}\n`)}){
  const directory=resolve(directoryArg);mkdirSync(directory,{recursive:true,mode:0o700});privateDirectory(directory);
  // A crash or power cut leaves a lock behind. The agent takes it over only once its holder is provably gone.
  const release=acquireLock(directory,'agent.lock',{reclaimDead:true});process.once('exit',release);
@@ -37,7 +38,7 @@ export async function playMatch({sessionFile,directory:directoryArg,manifestFile
  const chains=rpcs.map(url=>new ChannelChain(new ChainClient(url,manifest.program,wallet,{allowLocal}),config));
  for(const chain of chains){const genesis=await chain.client.checkNetwork();if(genesis!==manifest.genesis)throw Error('This RPC is on a different chain from the manifest');}
  const stallMs=Math.max((stallSeconds??60)*1000,think*3000);
- const runner=new ChannelRunner({peer,chains,transport:new RelayTransport(relay,manifest.match,seat),bufferKey:(seq,attempt)=>ensureWallet(resolve(directory,`${manifest.match}.buffer-${seq}-${attempt}-keypair.json`)),log,decider,stallMs,
+ const runner=new ChannelRunner({peer,chains,transport:makeTransport?makeTransport(seat):new RelayTransport(relay,manifest.match,seat),bufferKey:(seq,attempt)=>ensureWallet(resolve(directory,`${manifest.match}.buffer-${seq}-${attempt}-keypair.json`)),log,decider,stallMs,
   ...(pollSeconds===null?{}:{pollMs:pollSeconds*1000,chainPollMs:Math.max(1000,pollSeconds*5000),disputePollMs:Math.max(1000,pollSeconds*5000)})});
  try{
   const result=await runner.run();

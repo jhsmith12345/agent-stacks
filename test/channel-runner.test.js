@@ -180,7 +180,7 @@ test('the relay carries messages, refuses bad requests, and agents survive it ly
  assert.equal((await fetch(`${relay.url}/not-a-match/0`)).status,404);
  assert.equal((await fetch(`${relay.url}/${match}/0`,{method:'POST',body:'not json'})).status,400);
  assert.equal((await fetch(`${relay.url}/${match}/0`,{method:'PUT',body:'{}'})).status,405);
- assert.equal((await fetch(`${relay.url}/${match}/0`,{method:'POST',body:Buffer.alloc(1_300_000)})).status,413);
+ assert.equal((await fetch(`${relay.url}/${match}/0`,{method:'POST',body:Buffer.alloc(1_600_000)})).status,413);
 });
 test('a channel account decodes, and its hand state matches what the players sign',{timeout:60000},()=>{
  const [stateA]=inPlay(),a=peer(0,stateA),s=a.state.s;

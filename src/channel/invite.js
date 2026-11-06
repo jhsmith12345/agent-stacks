@@ -43,6 +43,11 @@ export function decodeInvite(code){
  let fields;try{fields=JSON.parse(Buffer.from(text.slice(PREFIX.length),'base64url').toString());}catch{throw Error('This isn’t an invite');}
  return withId(checkInvite(fields));
 }
+// Where the match's messages go, and the key that seals them. Both come from the secret, so nobody without the
+// invite can find the mailbox, unlike one named after the match's public address, and the relay can't read it.
+const derived=(invite,label)=>createHash('sha256').update(`agent-stacks/invite/${label}/v1:`).update(Buffer.from(invite.secret,'hex')).digest();
+export const matchMailbox=invite=>new PublicKey(derived(invite,'mailbox')).toBase58();
+export const matchKey=invite=>derived(invite,'relay-key');
 const macKey=invite=>createHash('sha256').update('agent-stacks/invite/mac/v1:').update(Buffer.from(invite.secret,'hex')).digest();
 const macOf=(invite,type,body)=>createHmac('sha256',macKey(invite)).update(type).update('\0').update(JSON.stringify(body)).digest();
 export const seal=(invite,type,body)=>({type,body,mac:macOf(invite,type,body).toString('hex')});

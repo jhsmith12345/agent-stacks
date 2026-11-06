@@ -317,7 +317,7 @@ const SCENARIOS={
    const unattended=stacks(dir,'home-b',['join',code]);await unattended.done;
    assert(unattended.exit.code!==0&&/--yes/.test(unattended.err),`refused without consent: ${unattended.err.slice(-300)}`);
    assert(await lamports(wallets[1])===before,'not a lamport moved');
-   assert((relay.boxes.get(`${decodeInvite(code).id}/0`)?.length??0)===0,'and the host heard nothing');
+   assert((relay.boxes.get(`${decodeInvite(code).id}/0`)?.items.length??0)===0,'and the host heard nothing');
    return {refused:true};
   }finally{if(host&&host.exit===null)host.child.kill('SIGKILL');relay.close();}
  },

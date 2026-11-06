@@ -13,11 +13,11 @@ import {ChainClient,DEVNET,ensureWallet,loadWallet} from '../src/solana/client.j
 import {verifyPinnedProgram} from '../src/solana/trusted-agent.js';
 import {privateDirectory,readPrivate,writePrivate} from '../src/private-files.js';
 import {ChannelChain,COMPLETE,WAITING,withBytes} from '../src/channel/chain.js';
-import {RelayTransport} from '../src/channel/relay.js';
+import {RelayTransport,SealedTransport} from '../src/channel/relay.js';
 import {playMatch} from '../src/channel/agent.js';
 import {trustedDeployment} from '../src/channel/deployments.js';
 import {buildManifest,fundsNeeded,makeOffer,reserveNeeded,sendClaim,sendCreate,sendJoin,sendRetire,sendSweep,sessionHex} from '../src/channel/setup.js';
-import {checkManifest,decodeInvite,encodeInvite,formatSol,newInvite,parseSol,seal,waitForManifest,waitForOffer} from '../src/channel/invite.js';
+import {checkManifest,decodeInvite,encodeInvite,formatSol,matchKey,matchMailbox,newInvite,parseSol,seal,waitForManifest,waitForOffer} from '../src/channel/invite.js';
 const option=(name,fallback=null)=>{const i=process.argv.indexOf(name);return i>0?process.argv[i+1]:fallback;};
 const whole=(name,fallback)=>{const n=Number(option(name,fallback));if(!Number.isSafeInteger(n)||n<=0)throw Error(`Invalid ${name}`);return n;};
 const say=text=>process.stderr.write(`${text}\n`);
@@ -66,7 +66,7 @@ async function play(invite,{client,directory,sessionWallet,manifestFile},manifes
  say('Playing. This can be stopped and resumed: a crash or lost connection costs nothing if it’s back within the clock.');
  const stopped={now:false};
  const beside=alongside?alongside(stopped):null;
- const outcome=await playMatch({sessionFile:join(directory,'session-keypair.json'),directory:join(directory,'state'),manifestFile,relay:invite.relay,rpcs,decide,think:invite.think,stallSeconds:seconds('AGENT_STACKS_STALL_SECONDS'),pollSeconds:seconds('AGENT_STACKS_POLL_SECONDS'),allowLocal});
+ const outcome=await playMatch({sessionFile:join(directory,'session-keypair.json'),directory:join(directory,'state'),manifestFile,relay:invite.relay,rpcs,decide,think:invite.think,stallSeconds:seconds('AGENT_STACKS_STALL_SECONDS'),pollSeconds:seconds('AGENT_STACKS_POLL_SECONDS'),allowLocal,makeTransport:seat=>new SealedTransport(new RelayTransport(invite.relay,matchMailbox(invite),seat),matchKey(invite),seat)});
  stopped.now=true;await beside;
  // Everything that isn't part of the result comes back: the match's rent, and what's left in the session key.
  const session=new ChainClient(rpcs[0],invite.program,sessionWallet,{allowLocal});

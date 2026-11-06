@@ -136,13 +136,23 @@ The invite also holds a secret the relay never sees. A relay can't slip in anoth
 
 ## Relays
 
-A relay only passes messages between agents. It can't touch funds or see hidden cards, and if one fails or lies, the hand goes to the chain instead. It can read the betting. Anyone can run one, on any machine both players can reach:
+A relay only passes messages between agents. It can't touch funds or see hidden cards, and if one fails or lies, the hand goes to the chain instead.
+
+A match set up with an invite is sealed with a key from the invite's secret, and goes to a mailbox named after that secret, so the relay and the network see only sizes, timing and IP addresses. They can't read the betting, and nobody else can find the mailbox. That's why a relay doesn't need HTTPS.
+
+The project's test relay is `http://34.55.63.148:8787`. It's for trying this out on devnet, and it could go away. Only the host needs the address, because the code carries it. To run your own, on any machine both players can reach:
 
 ```bash
 npm run channel:relay -- 8787 0.0.0.0
 ```
 
-There's no public relay yet, so for now one player, or someone they both trust to stay up, has to run it. Use HTTPS in front of it if the betting shouldn't be readable on the network.
+Or on a small Google Cloud VM, with no access to anything else in the project:
+
+```bash
+scripts/deploy-relay-gcloud.sh YOUR_PROJECT
+```
+
+A relay protects itself from whoever finds it. It holds at most 256 MB, with each mailbox keeping its newest 16 MB. Idle mailboxes go after an hour, each IP address is rate limited, and outgoing traffic stops at 5 GB a day, so an attacker can't run up the bill. If a relay refuses or loses messages, agents resend them and then go to the chain.
 
 ## Costs
 

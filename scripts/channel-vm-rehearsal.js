@@ -2,6 +2,7 @@
 // Each VM holds its own keys and shares only public files. The relay runs on this host, so neither VM depends
 // on the other's. Test funds only: this host funds each VM's wallets and they sweep what's left back afterwards.
 // Usage: node scripts/channel-vm-rehearsal.js FUNDER_KEYPAIR PROGRAM_ID LOG_DIRECTORY [SCENARIO...]
+// Set AGENT_STACKS_VM_RELAY to send the invite scenario through a relay elsewhere, such as a public one.
 // VMs: limactl start --name=stacks-a --cpus=2 --memory=2 --disk=4 --mount-none --vm-type=vz --network=vzNAT --containerd=none template:alpine-3.23
 import {spawn} from 'node:child_process';
 import {mkdirSync,writeFileSync} from 'node:fs';
@@ -165,7 +166,7 @@ const SCENARIOS={
   }
   const returnFunds=async()=>{for(const seat of [0,1])await channel(seat,`sweep ${dir}/home/wallet-keypair.json ${funder.publicKey.toBase58()} ${program}`).catch(error=>log(`sweep: ${error.message}`));};
   try{
-   await vm(0,`AGENT_STACKS_STALL_SECONDS=120 AGENT_STACKS_POLL_SECONDS=0.25 setsid nohup ${stacks(0,`host --relay ${RELAY} --buy-in 0.001 --big-blind 0.00002 --hands 2 --clock 600 --think 10 --decide '${bot('raise')}'`)} >> ${dir}/out 2>> ${dir}/err < /dev/null & echo started`);
+   await vm(0,`AGENT_STACKS_STALL_SECONDS=120 AGENT_STACKS_POLL_SECONDS=0.25 setsid nohup ${stacks(0,`host --relay ${process.env.AGENT_STACKS_VM_RELAY??RELAY} --buy-in 0.001 --big-blind 0.00002 --hands 2 --clock 600 --think 10 --decide '${bot('raise')}'`)} >> ${dir}/out 2>> ${dir}/err < /dev/null & echo started`);
    const code=await waitFor('the invite code',async()=>{const text=await vm(0,`cat ${dir}/out 2>/dev/null || true`);return text.split('\n').find(l=>l.startsWith('stacks1.'));},120_000);
    log('the code crossed to machine B');
    await vm(1,`AGENT_STACKS_STALL_SECONDS=120 AGENT_STACKS_POLL_SECONDS=0.25 setsid nohup ${stacks(1,`join ${code} --yes --decide '${bot('call')}'`)} >> ${dir}/out 2>> ${dir}/err < /dev/null & echo started`);

@@ -25,6 +25,12 @@ Showing and mucking changed the state format, so the earlier channel program, `G
 
 The host's loss is the permanent tombstone at the match's address plus fees.
 
+### A relay on the public internet, 2026-11-05
+
+`scripts/deploy-relay-gcloud.sh` runs a relay on an `e2-micro` VM at `http://34.55.63.148:8787`, with no service account, SSH off, and only the relay's port open. An invite match between the two VMs went through it on public devnet: 2 hands in 101 seconds, 4 transactions, with both reporting the same result. Its messages were sealed with a key from the invite's secret, so the relay held only ciphertext, about 11.7 MB of it, until the mailboxes expired.
+
+The two VMs still share one home network and one public address. Only the relay was somewhere else.
+
 ### Public devnet, earlier build, 2026-11-05
 
 Program `GQkM4Uo4hPx8qL4UqkaoA8CZDUGR9GgvZxBaN46UNEGd`, the channel-only build. Bytes dumped from chain matched `e0a2d27106d29706a393ac2a5ffa732d263ba39828b35470de66a5b2433b5a62`. It's upgradeable, with the project payer as authority, so it isn't trustless yet. Deploying took 16 seconds and 0.9075 test SOL.
@@ -75,7 +81,7 @@ The older path needed 57 minutes and about 2,900 transactions for 2 hands in its
 ### Automated checks
 
 - **Engine against contract:** 600 random betting games and 3,000 hand rankings match byte for byte, including illegal moves. A whole hand with real keys, shuffles and proofs matches at every step in the SBF VM.
-- **Tests:** 35 for the contract in the VM, also run against the channel-only build. 49 for the agent and its dispute decisions, 38 for connecting a decision program, 11 for the invite, and 2 for the fairness of the deal.
+- **Tests:** 35 for the contract in the VM, also run against the channel-only build. 49 for the agent and its dispute decisions, 38 for connecting a decision program, 11 for the invite, 19 for the relay's limits and sealing, and 2 for the fairness of the deal.
 - **Fair deal:** across 52,000 shuffles every card is equally likely in every position, and across 30,000 deals dealt the way a match deals them neither seat wins more often and ties come up at about the real hold'em rate. Both run on every test pass, with limits six standard deviations out. This checks the shuffle and hand ranking, not the mental-poker encryption around them.
 - **Compute:** at most 97,988 units for a share move and 7,069 for a betting move.
 
@@ -86,6 +92,7 @@ Mutation checks break one rule at a time in a scratch copy and confirm a test fa
 | Contract | 65 of 67 | Claiming a held payout twice: the Solana runtime separately refuses to take an account below its rent minimum. Mucking before showdown: the contract's phase check also stops it |
 | Agent | 31 of 32 | Co-signing with its own move pending: the one-signature-per-step rule also stops it |
 | Dispute decisions | 16 of 16 | |
+| Relay limits and sealing | 39 of 39 | The first run caught 37: nothing checked that dropped messages left the memory total, or that nonces never repeat. Both have tests now |
 | Decision programs and invites | 72 of 74 | An answer meant for an earlier question: the check that asks the question also stops it. Offering a raise after already acting: heads-up play can't reach that state, because the only raise that doesn't reopen the betting is an all-in, which leaves nobody to raise against |
 
 The first mutation runs caught only about half: 32 of 48 in the contract and 11 of 22 in the agent. Most misses were tests failing for the wrong reason. The rollback test, for example, used bad signatures, so it passed even with the window rule removed. Those tests were rewritten. The first run on decision programs and invites caught 62 of 72, and most of those misses got better tests too. The `stacks` command itself isn't under mutation: its checks are covered by the invite scenarios above.
@@ -122,7 +129,7 @@ Playing with real decisions then found these:
 
 - It hasn't run on two physical machines. Two VMs on one Mac share a host, a network path and a clock source.
 - No real agent has played. Every match used the simple styles in `examples/decision-bot.js`, and no language model or person has used the interface or the invite.
-- The relay has no matchmaking, and hasn't faced the public internet. There's no public relay yet.
+- The relay has no matchmaking. It's been on the public internet for hours, not weeks, and its limits have only been tested locally, not under a real flood.
 - The deployed program is upgradeable, so the "deployer" row in the design doesn't hold yet.
 - Nobody independent has reviewed this design or code.
 - A hand plays out on chain only in tests and rehearsals, and the timeout-as-fold incentive argument is new.

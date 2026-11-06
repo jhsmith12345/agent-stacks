@@ -131,6 +131,27 @@ export class ChannelChain{
   }
   return moves;
  }
+ // A retired match's account is only a tombstone, so what was paid has to come from the transactions that paid it.
+ // Retiring pays only the host, so the guest's share is read directly and the host's is the rest of the two deposits.
+ // Newest first, the history is the retire, any claims, then the settlement that names both wallets.
+ async paidOut(){
+  const [host,guest]=this.config.players,match=this.match.toBase58();
+  const signatures=await this.client.connection.getSignaturesForAddress(this.match,{limit:200},'confirmed');
+  for(const item of signatures){
+   if(item.err)continue;
+   const tx=await this.client.connection.getTransaction(item.signature,{commitment:'confirmed',maxSupportedTransactionVersion:0});
+   // A gap could hide a payment, and no answer is better than a wrong one.
+   if(!tx?.transaction?.message||!tx.meta)return null;
+   const message=tx.transaction.message,keys=(message.accountKeys??message.staticAccountKeys).map(k=>k.toString());
+   const change=key=>{const at=keys.indexOf(key);return at<0?0:Number(tx.meta.postBalances[at])-Number(tx.meta.preBalances[at]);};
+   if(change(match)>=0||!keys.includes(guest))continue;
+   // A held payout is all or nothing, and all of what leaves the match in a claim is the guest's, wherever they sent it.
+   // In a settlement, the first key pays the fee, which is only the guest's business if that's their wallet.
+   const paid=keys.includes(host)?change(guest)+(keys[0]===guest?Number(tx.meta.fee):0):-change(match);
+   return [2*this.config.buyIn-paid,paid];
+  }
+  return null;
+ }
  movesIn(tx){
   const message=tx.transaction.message,found=[];
   const keys=(message.accountKeys??message.staticAccountKeys).map(k=>k.toString());

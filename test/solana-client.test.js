@@ -178,3 +178,42 @@ test('an unusable co-signature is refused before anything is recorded, and retur
  await assert.rejects(c.submit(tx),e=>e.signature===undefined);
  assert.equal(released,1);assert.equal(sent,0);assert.deepEqual(events,[]);
 });
+test('a transaction that fails on chain is reported as itself, though its error holds BigInts',async()=>{
+ const w=await Keypair.generate(),events=[];const c=new ChainClient(DEVNET,w.publicKey,w,{onTransaction:(s,d)=>{JSON.stringify(d);events.push(d);}});c.networkChecked=true;
+ c.connection={getLatestBlockhash:async()=>({blockhash:'11111111111111111111111111111111',lastValidBlockHeight:100n}),simulateTransaction:accept,sendRawTransaction:async()=>'ok',getSignatureStatuses:async()=>({value:[{confirmationStatus:'confirmed',err:{InstructionError:[1n,{Custom:7n}]}}]})};
+ await assert.rejects(c.send([c.instruction(0,[],[])]),/failed: \{"InstructionError":\["1",\{"Custom":"7"\}\]\}/);
+ assert.deepEqual(events.at(-1),{status:'failed',error:{InstructionError:['1',{Custom:'7'}]}},'and the journal can hold it');
+});
+test('waiting for a confirmation is limited by time, however long each poll takes',async()=>{
+ const w=await Keypair.generate();
+ const c=new ChainClient('http://127.0.0.1:18899',w.publicKey,w,{allowLocal:true,confirmMs:300});c.networkChecked=true;
+ let polls=0;
+ // What a rate-limited RPC looks like: every poll takes a while, inside the RPC library's own retries, and then fails.
+ const refused=async()=>{polls++;await new Promise(done=>setTimeout(done,100));throw Object.assign(Error('429'),{rpcFailure:true});};
+ c.connection={getLatestBlockhash:async()=>({blockhash:'11111111111111111111111111111111',lastValidBlockHeight:100n}),simulateTransaction:accept,sendRawTransaction:async()=>'ok',getSignatureStatuses:refused};
+ const started=Date.now();
+ await assert.rejects(c.send([c.instruction(0,[],[])]),e=>/Confirmation uncertain/.test(e.message)&&!!e.signature,'and it says what it sent, so the caller can check');
+ assert.ok(Date.now()-started<800,`gave up on time, after ${Date.now()-started} ms`);
+ assert.ok(polls>=2&&polls<=3,`${polls} polls`);
+});
+test('only an RPC on this machine is polled quickly, whatever the local flag says',async()=>{
+ const w=await Keypair.generate();
+ const count=async(url)=>{
+  const c=new ChainClient(url,w.publicKey,w,{allowLocal:true,confirmMs:2200});c.networkChecked=true;
+  let polls=0;
+  c.connection={getLatestBlockhash:async()=>({blockhash:'11111111111111111111111111111111',lastValidBlockHeight:100n}),simulateTransaction:accept,sendRawTransaction:async()=>'ok',getSignatureStatuses:async()=>{polls++;return {value:[null]};}};
+  await assert.rejects(c.send([c.instruction(0,[],[])]),/Confirmation uncertain/);
+  return polls;
+ };
+ const [remote,local]=await Promise.all([count(DEVNET),count('http://127.0.0.1:18899')]);
+ assert.ok(remote<=3,`public devnet polled ${remote} times in 2.2 seconds`);
+ assert.ok(local>=20,`a local validator polled ${local} times`);
+});
+test('a send that goes unconfirmed is sent again every few seconds, however fast it polls',async()=>{
+ const w=await Keypair.generate();
+ const c=new ChainClient('http://127.0.0.1:18899',w.publicKey,w,{allowLocal:true,confirmMs:3600});c.networkChecked=true;
+ let sends=0;
+ c.connection={getLatestBlockhash:async()=>({blockhash:'11111111111111111111111111111111',lastValidBlockHeight:100n}),simulateTransaction:accept,sendRawTransaction:async()=>{sends++;return 'ok';},getSignatureStatuses:async()=>({value:[null]})};
+ await assert.rejects(c.send([c.instruction(0,[],[])]),/Confirmation uncertain/);
+ assert.equal(sends,2,'the first send, and one more after three seconds');
+});

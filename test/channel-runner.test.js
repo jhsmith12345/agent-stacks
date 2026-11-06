@@ -7,7 +7,7 @@ import {RelayTransport,startRelay} from '../src/channel/relay.js';
 import {sessionFromSeed} from '../src/channel/keys.js';
 import {PublicKey} from '@solana/web3.js';
 import {accountBlob,ChannelChain,channelAddress,channelTerms,CHANNEL_SPACE,COMPLETE,decodeChannel,ED25519,ed25519Instruction,EXIT,OPEN,WAITING} from '../src/channel/chain.js';
-import {encodeHand,KIND_HAND,P_DONE,sha256,signedMessage} from '../src/channel/engine.js';
+import {encodeHand,KIND_HAND,KIND_STACKS,P_DONE,sha256,signedMessage} from '../src/channel/engine.js';
 import {fromHex,toHex} from '../src/channel/wire.js';
 import {signMessage} from '../src/channel/keys.js';
 import {acceptedManifest} from '../src/channel/manifest.js';
@@ -302,6 +302,45 @@ test('an agent carries on when the opponent posts its own signed move and then p
  await runner(a,chain).tick();
  assert.equal(a.state.latest.seq,reply.seq,'it caught up instead of waiting forever');
 });
+test('if the contract keeps refusing the newest state, the match still ends: it falls back to the last agreed stacks',{timeout:60000},async()=>{
+ const refusal=()=>Object.assign(Error('Transaction rejected in simulation and not sent: {"InstructionError":["2","InvalidArgument"]}'),{notSent:true});
+ // On hand 1 nothing has been agreed yet, so it falls back to the original deposits.
+ const [stateA]=inPlay(),a=peer(0,stateA);
+ const chain=scriptedChain(onChain(a,{phase:OPEN}));
+ let tries=0;chain.postHand=async()=>{tries++;throw refusal();};
+ const logged=[],r=runner(a,chain,{log:s=>logged.push(s)});
+ for(let i=0;i<5;i++)await r.tick();
+ assert.equal(tries,5,'it tries its newest state first, a few times');
+ assert.deepEqual(chain.calls,[]);
+ await r.tick();
+ assert.deepEqual(chain.calls,[{type:'exit'}]);
+ assert.equal(tries,5);
+ assert.ok(logged.some(s=>/keeps refusing state .* original deposits/.test(s)));
+ // Later in a match, it's the last stacks both signed.
+ const b=peer(0,stateA);
+ b.state.lastStacks={kind:KIND_STACKS,seq:3,payload:'00'.repeat(20),sigs:['aa'.repeat(64),'bb'.repeat(64)]};
+ const later=scriptedChain(onChain(b,{phase:OPEN}));later.postHand=async()=>{throw refusal();};
+ const rb=runner(b,later);
+ for(let i=0;i<6;i++)await rb.tick();
+ assert.deepEqual(later.calls,[{type:'stacks',seq:3}]);
+ // With that posted and the window open, it doesn't keep trying the state the contract won't take.
+ let again=0;later.postHand=async()=>{again++;throw refusal();};
+ later.state=onChain(b,{phase:EXIT,seq:3,window:2000,deadline:2000});
+ await rb.tick();
+ assert.equal(again,0);
+});
+test('a node being down is not the contract refusing, so nothing falls back for it',{timeout:60000},async()=>{
+ const [stateA]=inPlay(),a=peer(0,stateA);
+ const chain=scriptedChain(onChain(a,{phase:OPEN}));
+ const failures=[Object.assign(Error('fetch failed'),{rpcFailure:true}),Object.assign(Error('Transaction rejected in simulation and not sent: blockhash not found'),{notSent:true}),Error('InstructionError, but not from a simulation')];
+ chain.postHand=async()=>{throw failures[0];};
+ for(const failure of failures){
+  chain.postHand=async()=>{throw failure;};
+  const r=runner(a,chain);
+  for(let i=0;i<12;i++)await r.tick();
+  assert.deepEqual(chain.calls,[],failure.message);
+ }
+});
 test('a relay that silently hangs can’t hold up the chain checks',{timeout:20000},async()=>{
  const [stateA]=inPlay(),a=peer(0,stateA);
  const never=new Promise(()=>{});
@@ -350,4 +389,32 @@ test('catching up fetches only what’s new, because a slow fetch can cost a dea
  moves=await chain.onChainMoves(4);
  assert.deepEqual([...moves.keys()],[6,5]);assert.deepEqual(moves.get(6).step,{muck:true});
  assert.equal(fetched,2,'only the two new ones');
+});
+test('once a match is retired, what was paid comes from the transactions that paid it',async()=>{
+ const host='11111111111111111111111111111114',guest='11111111111111111111111111111115',session='11111111111111111111111111111116';
+ const program=new PublicKey('11111111111111111111111111111112');
+ const terms={...config(),players:[host,guest]},match=terms.match;
+ // Each entry is the transaction's keys in order and how each one's balance changed. BigInts, as the RPC client returns.
+ const tx=(changes,fee=5000)=>{const keys=Object.keys(changes);return {transaction:{message:{staticAccountKeys:keys.map(k=>new PublicKey(k)),compiledInstructions:[]}},meta:{fee:BigInt(fee),preBalances:keys.map(()=>10_000_000n),postBalances:keys.map(k=>BigInt(10_000_000+changes[k]))}};};
+ const retire=tx({[host]:22_000_000,[match]:-22_005_000});
+ const join=tx({[guest]:-1_000_000,[match]:1_000_000});
+ const create=tx({[host]:-1_000_000,[match]:1_000_000});
+ const settle=(hostPaid,guestPaid)=>tx({[session]:-5000,[match]:-(hostPaid+guestPaid),[host]:hostPaid,[guest]:guestPaid});
+ const reader=history=>new ChannelChain({connection:{
+  getSignaturesForAddress:async()=>history.map((e,i)=>({signature:`s${i}`,err:e==='failed'?{}:null})),
+  getTransaction:async signature=>history[Number(signature.slice(1))],
+ },program,wallet:{publicKey:program}},terms);
+ const buyIn=terms.buyIn;
+ assert.deepEqual(await reader([retire,settle(1_080_000,920_000),join,create]).paidOut(),[1_080_000,920_000],'the host’s rent isn’t counted as winnings');
+ assert.deepEqual(await reader([retire,settle(2*buyIn,0),join,create]).paidOut(),[2*buyIn,0],'a guest who lost everything was paid nothing, which isn’t the same as unknown');
+ assert.deepEqual(await reader([settle(1_080_000,920_000),join,create]).paidOut(),[1_080_000,920_000],'also before it’s retired');
+ assert.deepEqual(await reader([retire,tx({[guest]:920_000-5000,[match]:-2_000_000,[host]:1_080_000}),join,create]).paidOut(),[1_080_000,920_000],'the fee isn’t held against a guest who sent the settlement');
+ // A guest whose payout was held claims it later, and pays the fee for that out of the same wallet.
+ const elsewhere='11111111111111111111111111111117';
+ assert.deepEqual(await reader([retire,tx({[guest]:920_000-5000,[match]:-920_000}),settle(1_080_000,0),join,create]).paidOut(),[1_080_000,920_000],'a held payout, claimed later');
+ assert.deepEqual(await reader([retire,tx({[guest]:-5000,[match]:-920_000,[elsewhere]:920_000}),settle(1_080_000,0),join,create]).paidOut(),[1_080_000,920_000],'and it’s still theirs if they sent it elsewhere');
+ assert.deepEqual(await reader([retire,tx({[host]:1_075_000,[match]:-1_080_000}),settle(0,920_000),join,create]).paidOut(),[1_080_000,920_000],'the host’s own claim says nothing about the guest');
+ assert.deepEqual(await reader(['failed',retire,settle(1_000_000,1_000_000),join,create]).paidOut(),[1_000_000,1_000_000],'a failed transaction is skipped');
+ assert.equal(await reader([join,create]).paidOut(),null,'nothing was paid yet, so there’s no answer');
+ assert.equal(await reader([retire,null,settle(1_080_000,920_000),join,create]).paidOut(),null,'a gap in the history gives no answer, rather than a wrong one');
 });

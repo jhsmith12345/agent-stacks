@@ -1597,3 +1597,84 @@ fn a_timed_out_showdown_counts_as_a_fold_and_reveals_nothing_more() {
     assert_eq!(g.holes, [[255, 255], [255, 255]]);
     assert!(h.lamports(&h.b.pubkey()) - b > h.lamports(&h.a.pubkey()) - a);
 }
+// A state both players can sign but the contract won't take can't be defended, and if it's the newest one the
+// match can get stuck. So every state of every kind of hand has to be accepted, at every step.
+const ALL_TRACES: [&str; 9] = [
+    "riverBetMucked",
+    "riverBetShown",
+    "checkedDownMucked",
+    "allInCalled",
+    "smallBlindAllIn",
+    "underSmallBlind",
+    "bigBlindSameAsSmall",
+    "underBothBlinds",
+    "betweenTheBlinds",
+];
+#[test]
+fn every_state_two_players_can_sign_can_be_posted() {
+    let mut main = vec![vectors()["accept"].clone()];
+    main.extend(vectors()["steps"].as_array().unwrap().iter().cloned());
+    let mut posted = 0;
+    for name in ALL_TRACES {
+        let trace = &vectors()["traces"][name];
+        let mut states = main.clone();
+        if !trace["accept"].is_null() {
+            states = vec![trace["accept"].clone()];
+        }
+        states.extend(trace["steps"].as_array().unwrap().iter().cloned());
+        for state in &states {
+            let mut h = H::joined();
+            if let Err(error) = h.post_state(state) {
+                panic!(
+                    "{name}: the state at step {} was refused: {error:?}",
+                    state["seq"]
+                );
+            }
+            posted += 1;
+        }
+    }
+    assert!(posted > 200, "only {posted} states were tried");
+}
+#[test]
+fn a_player_all_in_from_a_blind_can_finish_the_hand_on_chain() {
+    for name in [
+        "smallBlindAllIn",
+        "underSmallBlind",
+        "bigBlindSameAsSmall",
+        "underBothBlinds",
+        "betweenTheBlinds",
+    ] {
+        let trace = &vectors()["traces"][name];
+        let mut h = H::joined();
+        h.post_state(&trace["accept"])
+            .unwrap_or_else(|error| panic!("{name}: the first state was refused: {error:?}"));
+        let window = h.window();
+        h.at(window);
+        let steps = trace["steps"].as_array().unwrap();
+        for step in steps {
+            h.apply(step).unwrap_or_else(|error| {
+                panic!("{name}: the move at step {} failed: {error:?}", step["seq"])
+            });
+        }
+        let state = h.state();
+        assert_eq!(
+            hex::encode(channel::blob(&state)),
+            steps.last().unwrap()["blob"].as_str().unwrap(),
+            "{name}: the contract reached the same state as the players"
+        );
+        assert_eq!(h.phase(), channel::EXIT, "{name}");
+        let (a, b) = (h.lamports(&h.a.pubkey()), h.lamports(&h.b.pubkey()));
+        h.timeout().unwrap();
+        let final_stacks = &trace["final"];
+        assert_eq!(
+            h.lamports(&h.a.pubkey()) - a,
+            final_stacks[0].as_u64().unwrap(),
+            "{name}: seat 0's payout"
+        );
+        assert_eq!(
+            h.lamports(&h.b.pubkey()) - b,
+            final_stacks[1].as_u64().unwrap(),
+            "{name}: seat 1's payout"
+        );
+    }
+}

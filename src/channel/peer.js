@@ -87,7 +87,11 @@ export class ChannelPeer{
    return replies;
   }catch(error){
    if(error.fatal)throw error;
-   this.st.rejected++;this.lastRejection=error.message;return [];
+   this.st.rejected++;this.lastRejection=error.message;
+   // A count by reason, because a resend that arrives late is normal and anything else is worth a look.
+   const why=this.st.rejectedWhy??={};
+   if(why[error.message]!==undefined||Object.keys(why).length<32)why[error.message]=(why[error.message]??0)+1;
+   return [];
   }
  }
  isFuture(m){
@@ -159,6 +163,7 @@ export class ChannelPeer{
  recordBoth(kind,seq,payload,mine,theirs){
   const sigs=[null,null];sigs[this.seat]=toHex(mine);sigs[this.opponent]=toHex(theirs);
   this.st.latest={kind,seq,payload:toHex(payload),sigs};
+  if(kind===KIND_STACKS)this.st.lastStacks=clone(this.st.latest);
   this.st.seq=seq;this.st.mine=null;this.st.theirs[seq]={kind,hash:toHex(sha256(payload)),sig:toHex(theirs)};
  }
  // Two different opponent signatures at one step prove a fork, and the contract forfeits their stake for it.
@@ -190,7 +195,7 @@ export class ChannelPeer{
   const payload=encodeHand(s);
   if(!sha256(payload).equals(hash))throw Error('Signed state does not match this move');
   const mine=this.sign(KIND_HAND,m.seq,hash);
-  this.remember(other,m.seq,m.step,s);
+  this.remember(other,m.seq,m.step);
   st.s=s;this.recordBoth(KIND_HAND,m.seq,payload,mine,sig);
   const ack={type:'ack',seq:m.seq,kind:KIND_HAND,hash:m.hash,sig:toHex(mine)};
   return this.send([ack,...this.next()]);
@@ -272,7 +277,7 @@ export class ChannelPeer{
   const st=this.st,seq=st.seq+1,step=this.chooseStep();
   const s=clone(st.s);this.applyStep(s,this.seat,step);
   const payload=encodeHand(s),hash=sha256(payload),sig=this.sign(KIND_HAND,seq,hash);
-  this.remember(this.seat,seq,step,s);(st.decided??={})[seq]=step;
+  this.remember(this.seat,seq,step);(st.decided??={})[seq]=step;
   st.s=s;st.mine={kind:KIND_HAND,seq,sig:toHex(sig),step};
   return [{type:'move',seq,step,hash:toHex(hash),sig:toHex(sig)}];
  }
@@ -324,10 +329,13 @@ export class ChannelPeer{
   return {action:view.owed>0?0:1,amount:0};
  }
  // The betting so far this hand, for whoever is deciding. Nothing signed or checked depends on it.
- remember(seat,seq,step,after){
+ remember(seat,seq,step){
   if(step.action===undefined)return;
-  const raised=step.action===3||step.action===4;
-  (this.st.betting??=[]).push({seq,street:this.st.s.game.street,seat,action:step.action,...(raised?{to:after.game.currentBet}:{})});
+  const g=this.st.s.game,entry={seq,street:g.street,seat,action:step.action};
+  if(step.action===3)entry.to=step.amount;
+  // Going all-in for no more than the current bet is a call, so it has nothing to raise to.
+  if(step.action===4&&g.bets[seat]+g.stacks[seat]>g.currentBet)entry.to=g.bets[seat]+g.stacks[seat];
+  (this.st.betting??=[]).push(entry);
  }
  // How each finished hand went. It's only a record, so a failure here must never get in the way of play.
  noteResult(){
@@ -348,6 +356,8 @@ export class ChannelPeer{
  }
  // For a dispute: the newest state this player can post, with both signatures.
  postable(){return this.st.latest?clone(this.st.latest):null;}
+ // The last point both players agreed the stacks, from before the hand in progress. See the runner for its use.
+ fallback(){return this.st.lastStacks?clone(this.st.lastStacks):null;}
  // Changes only when the match really moves on, so junk from a relay can't look like progress.
  progress(){const st=this.st;return `${st.hand}/${st.stage}/${st.latest?.seq??0}/${st.mine?.seq??0}/${st.setup?.keys?.filter(Boolean).length??0}/${toHex(sha256(Buffer.from(JSON.stringify(st.setup?.deck?.[0]??null)))).slice(0,8)}`;}
  markDisputed(){if(!this.st.disputed){this.st.disputed=true;this.persist();}}
@@ -374,7 +384,7 @@ export class ChannelPeer{
    const s=clone(st.s),step=this.nextStep(s);
    this.applyStep(s,this.seat,step);
    const sig=this.sign(KIND_HAND,seq,sha256(encodeHand(s)));
-   this.remember(this.seat,seq,step,s);(st.decided??={})[seq]=step;
+   this.remember(this.seat,seq,step);(st.decided??={})[seq]=step;
    st.s=s;st.mine={kind:KIND_HAND,seq,sig:toHex(sig),step};
    this.persist();
   }
@@ -389,7 +399,7 @@ export class ChannelPeer{
   if(!this.verify(other,KIND_HAND,seq,hash,signature))throw Error('Bad signature on an on-chain move');
   this.noteOpponentSignature(seq,KIND_HAND,toHex(hash),toHex(signature));
   const mine=this.sign(KIND_HAND,seq,hash);
-  this.remember(other,seq,step,s);
+  this.remember(other,seq,step);
   st.s=s;this.recordBoth(KIND_HAND,seq,payload,mine,signature);
   this.persist();
  }

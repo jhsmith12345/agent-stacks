@@ -385,7 +385,10 @@ fn load_hand(state: &mut [u8], payload: &[u8]) -> Result<bool, ProgramError> {
     check(total == u64_at(state, 81).checked_mul(2))?;
     let stage_matches = match phase {
         6 => g.stage == game::COMPLETE,
-        5 | 7 | 8 => g.stage == game::BETTING,
+        // A player all-in from a blind means no betting, so the game is already waiting on the board while the
+        // hole cards are still going out.
+        5 | 7 => g.stage == game::BETTING || g.stage == game::BOARD,
+        8 => g.stage == game::BETTING,
         9 | 10 => g.stage == game::BOARD,
         _ => g.stage == game::SHOWDOWN,
     };

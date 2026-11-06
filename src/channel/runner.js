@@ -6,14 +6,16 @@ import {STAGE} from './peer.js';
 import {fromHex} from './wire.js';
 import {COMPLETE,EXIT,OPEN,WAITING} from './chain.js';
 const quiet=error=>!!(error.rpcFailure||error.notSent||error.signature);
-const MAX_QUEUED=64;
+const MAX_QUEUED=64,REFUSALS_BEFORE_FALLBACK=5;
+// The contract itself said no, as opposed to a node being unavailable.
+const refusedByContract=error=>!!error.notSent&&/InstructionError/.test(error.message);
 export class ChannelRunner{
  // `decider` is an outside program making this player's decisions, if there is one. `lastMomentMs` is how
  // close to the on-chain deadline it stops being asked, because the move itself takes time to land.
  constructor({peer,chains,transport,bufferKey,stallMs=60_000,resendMs=5_000,pollMs=250,chainPollMs=15_000,disputePollMs=5_000,decider=null,lastMomentMs=10_000,log=()=>{}}){
   if(peer.outside&&!decider)throw Error('This agent is set up to ask a program for its decisions, but has no program');
   Object.assign(this,{peer,chains,transport,bufferKey,stallMs,resendMs,pollMs,chainPollMs,disputePollMs,decider,lastMomentMs,log});
-  this.asking=null;this.answers=[];this.told=0;
+  this.asking=null;this.answers=[];this.told=0;this.refusals=new Map();
   this.progressAt=Date.now();this.resentAt=0;this.chainAt=0;this.seen=null;this.stats={onChainTransactions:0,relayMessages:0};
   this.bufferAttempts=new Map();this.buffers=new Map();this.inbox=[];this.outgoing=[];this.sending=null;this.receiving=null;
  }
@@ -161,16 +163,30 @@ export class ChannelRunner{
   if(latest.kind===KIND_STACKS)return this.submit(`post stacks ${latest.seq}`,()=>this.chain.postStacks(signed,latest.seq,fromHex(latest.payload),latest.sigs));
   return this.submit(`close ${latest.seq}`,()=>this.chain.close(signed,this.peer.closeProof()??{seq:latest.seq,sigs:latest.sigs,stacks:[Number(fromHex(latest.payload).readBigUInt64LE(0)),Number(fromHex(latest.payload).readBigUInt64LE(8))]}));
  }
+ gaveUpOn(latest){return latest.kind===KIND_HAND&&(this.refusals.get(latest.seq)??0)>=REFUSALS_BEFORE_FALLBACK;}
+ async postCounting(latest){
+  try{return await this.post(latest);}
+  catch(error){if(refusedByContract(error))this.refusals.set(latest.seq,(this.refusals.get(latest.seq)??0)+1);throw error;}
+ }
  async disputeStep(state){
   const peer=this.peer,latest=peer.postable(),mine=latest?.seq??0;
   const time=await this.chain.chainTime();
   if(state.phase===OPEN){
-   if(latest)await this.post(latest);else await this.submit('exit with the original deposits',()=>this.chain.exitWithDeposits());
+   if(!latest||this.gaveUpOn(latest)){
+    // The contract should take anything both players signed. If it keeps refusing the newest state, the match
+    // mustn't hang with the deposits in it, so this falls back to the last agreed stacks. That gives up only the
+    // hand in progress. A lying node could cause this too, and that costs only the same.
+    const older=latest&&peer.fallback();
+    if(latest)this.log(`The contract keeps refusing state ${latest.seq}, so this falls back to ${older?`the stacks agreed at step ${older.seq}`:'the original deposits'}`);
+    if(older)await this.post(older);else await this.submit('exit with the original deposits',()=>this.chain.exitWithDeposits());
+    return;
+   }
+   await this.postCounting(latest);
    return;
   }
   // While the window is open, a newer state must go up now, because later it can't.
   if(time<state.window){
-   if(mine>state.seq)await this.post(latest);
+   if(mine>state.seq&&!this.gaveUpOn(latest))await this.postCounting(latest);
    return;
   }
   if(state.phase===EXIT){await this.submit('settle',()=>this.chain.timeout());return;}

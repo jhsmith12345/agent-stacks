@@ -42,6 +42,12 @@ export async function playMatch({sessionFile,directory:directoryArg,manifestFile
   ...(pollSeconds===null?{}:{pollMs:pollSeconds*1000,chainPollMs:Math.max(1000,pollSeconds*5000),disputePollMs:Math.max(1000,pollSeconds*5000)})});
  try{
   const result=await runner.run();
-  return {manifest,seat,payouts:result.payouts,stats:result.stats,seq:peer.state.latest?.seq??0,hand:peer.state.hand,rejected:peer.state.rejected,results:peer.state.results??[]};
+  // If the host retired the match first, the account no longer says what anyone won.
+  let payouts=result.payouts??null;
+  for(const chain of chains){
+   if(payouts)break;
+   payouts=await chain.paidOut().catch(error=>{log(`reading the payouts from history: ${error.message}`);return null;});
+  }
+  return {manifest,seat,payouts,stats:result.stats,seq:peer.state.latest?.seq??0,hand:peer.state.hand,rejected:peer.state.rejected,rejectedWhy:peer.state.rejectedWhy??{},results:peer.state.results??[]};
  }finally{closeDecider();release();process.removeListener('exit',release);process.removeListener('exit',closeDecider);}
 }

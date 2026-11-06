@@ -3,7 +3,7 @@
 import {existsSync,readFileSync} from 'node:fs';
 import {createHash} from 'node:crypto';
 import {resolve} from 'node:path';
-import {ChainClient,PublicKey,SystemProgram,DEVNET_GENESIS,LAYOUT,loadWallet,manifestRpc,patientConnection,redactRpc,termsHash} from '../src/solana/client.js';
+import {ChainClient,PublicKey,SystemProgram,DEVNET_GENESIS,LAYOUT,loadWallet,manifestRpc,patientConnection,readable,redactRpc,termsHash} from '../src/solana/client.js';
 import {Transaction,VersionedTransaction} from '@solana/web3.js';
 import {loadTrustPolicy,validateAcceptedMatch,verifyPinnedProgram,strictFundingRequired,PROOF_ACCOUNT_BYTES} from '../src/solana/trusted-agent.js';
 const args=process.argv.slice(2),value=name=>args.includes(name)?args[args.indexOf(name)+1]:null;
@@ -45,7 +45,7 @@ if(genesis)try{
  const latest=await attempt('Simulation',()=>connection.getLatestBlockhash('confirmed'));
  if(latest){
   const tx=new Transaction({feePayer:wallet.publicKey,...latest}).add(SystemProgram.transfer({fromPubkey:wallet.publicKey,toPubkey:wallet.publicKey,lamports:0n}));
-  await attempt('Simulation',async()=>{await tx.sign(wallet);const {value:result}=await connection.simulateTransaction(VersionedTransaction.deserialize(await tx.serialize()),{sigVerify:true,replaceRecentBlockhash:false,commitment:'processed'});if(result.err&&JSON.stringify(result.err)!=='"AccountNotFound"')throw Error(`Rejected: ${JSON.stringify(result.err)}`);pass('Simulation','Available with signature checks');});
+  await attempt('Simulation',async()=>{await tx.sign(wallet);const {value:result}=await connection.simulateTransaction(VersionedTransaction.deserialize(await tx.serialize()),{sigVerify:true,replaceRecentBlockhash:false,commitment:'processed'});if(result.err&&readable(result.err)!=='"AccountNotFound"')throw Error(`Rejected: ${readable(result.err)}`);pass('Simulation','Available with signature checks');});
  }
  if(policy.maxComputeUnitPrice){const fees=await attempt('Priority fees',()=>connection.getRecentPrioritizationFees());if(fees){const sorted=fees.map(f=>Number(f.prioritizationFee)).sort((a,b)=>a-b);pass('Priority fees',`Recent 75th percentile ${sorted[Math.floor(sorted.length*0.75)]??0}; policy ceiling ${policy.maxComputeUnitPrice}`);}}
  else warn('Priority fees','Policy has no ceiling, so transactions cannot outbid congestion, and a policy cannot change mid-match');

@@ -78,8 +78,11 @@ async function play(invite,{client,directory,sessionWallet,manifestFile},manifes
  }
  if(invite.host===address&&state&&!state.retired&&!state.pendingPayouts)await sendRetire({client,wallet,manifest}).catch(error=>say(`The match’s rent stays until it’s retired: ${error.message}`));
  const mine=outcome.payouts?.[outcome.seat]??null;
- if(mine!==null)say(`Match over after ${outcome.results.length} hand${outcome.results.length===1?'':'s'}. You started with ${formatSol(invite.buyIn)} SOL and finished with ${formatSol(mine)} SOL.`);
- console.log(JSON.stringify({complete:true,match:manifest.match,seat:outcome.seat,payouts:outcome.payouts,buyIn:invite.buyIn,hands:outcome.results.length,results:outcome.results,...outcome.stats,walletBalance:Number(await client.connection.getBalance(wallet.publicKey,'confirmed'))}));
+ const walletBalance=Number(await client.connection.getBalance(wallet.publicKey,'confirmed'));
+ const over=`Match over after ${outcome.results.length} hand${outcome.results.length===1?'':'s'}.`;
+ if(mine!==null)say(`${over} You started with ${formatSol(invite.buyIn)} SOL and finished with ${formatSol(mine)} SOL.`);
+ else say(`${over} The match has been closed and its history can’t be read right now, so this can’t say what you won. Your wallet holds ${formatSol(walletBalance)} SOL.`);
+ console.log(JSON.stringify({complete:true,match:manifest.match,seat:outcome.seat,payouts:outcome.payouts,buyIn:invite.buyIn,hands:outcome.results.length,results:outcome.results,...outcome.stats,walletBalance}));
 }
 async function asHost(invite){
  const context=await prepare(invite,{creating:true}),{client,directory,sessionWallet,reserve,manifestFile}=context;

@@ -26,7 +26,7 @@ const joint=point(keys[0].registration.publicKey,true).add(point(keys[1].registr
 const first=shuffleAndProve(initialDeck(),joint,shuffleContext(program,match,0,terms,1));
 const second=shuffleAndProve(first.output,joint,shuffleContext(program,match,1,terms,1));
 const deck=second.output;
-const hand=()=>acceptedHand({hand:1,keys:keys.map(k=>k.registration.publicKey),deck,stacks:[stake,stake],bigBlind:blind});
+const hand=(stacks=[stake,stake])=>acceptedHand({hand:1,keys:keys.map(k=>k.registration.publicKey),deck,stacks,bigBlind:blind});
 const raiseOnTheFlop=s=>{
  const seat=obligated(s),owed=s.game.currentBet-s.game.bets[seat];
  if(s.game.street===1&&s.game.acted===0&&s.game.stacks[seat]>3*blind)return [3,s.game.currentBet+2*blind];
@@ -57,7 +57,7 @@ function step(s,plan){
 }
 function record(s,move,seq){
  const blob=encodeHand(s),m=message(KIND_HAND,seq,blob);
- return {...move,seq,blob:hex(blob),message:hex(m),signature:hex(signMessage(sessions[move.seat],m))};
+ return {...move,seq,blob:hex(blob),message:hex(m),signature:hex(signMessage(sessions[move.seat],m)),signatures:both(m)};
 }
 // A move the rules forbid, correctly signed, so that only the rule itself can stop it on chain.
 function illegalMuck(s,seat,seq){
@@ -84,7 +84,18 @@ function playOut(s,startSeq,plan=raiseOnTheFlop,{mucks=false}={}){
 }
 const accepted=hand(),acceptBlob=encodeHand(accepted),acceptMessage=message(KIND_HAND,1,acceptBlob);
 const {steps,final,lastSeq,first:mainFirst}=playOut(structuredClone(accepted),1);
+// A hand where a player can't pay the blind in full, starting from its own first state. Seat 0 has the button,
+// so it pays the small blind and seat 1 the big one. Most of these have no betting at all.
+const short=(seat,amount)=>{
+ const stacks=seat===0?[amount,2*stake-amount]:[2*stake-amount,amount],start=hand(stacks),blob=encodeHand(start),m=message(KIND_HAND,1,blob);
+ return {accept:{seq:1,blob:hex(blob),message:hex(m),signatures:both(m)},...playOut(structuredClone(start),1,callOrCheck)};
+};
 const traces={
+ smallBlindAllIn:short(0,blind/2),
+ underSmallBlind:short(0,blind/4),
+ bigBlindSameAsSmall:short(1,blind/2),
+ underBothBlinds:short(1,blind/4),
+ betweenTheBlinds:short(1,blind*3/4),
  riverBetMucked:playOut(structuredClone(accepted),1,betTheRiver,{mucks:true}),
  riverBetShown:playOut(structuredClone(accepted),1,betTheRiver),
  checkedDownMucked:playOut(structuredClone(accepted),1,callOrCheck,{mucks:true}),

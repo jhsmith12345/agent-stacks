@@ -219,6 +219,19 @@ test('falling back to an older state on chain rolls the betting record back with
  assert.equal(again.step.action,2);assert.equal(again.seq,move.seq);
 });
 
+test('the betting record says what really happened, including an all-in that only calls',{timeout:60000},()=>{
+ const a=dealer();
+ const record=(game,step)=>{a.state.s.game={...a.state.s.game,street:1,...game};a.state.betting=[];a.remember(0,70,step);return a.state.betting[0];};
+ // Found by the simulation: all-in for less than the bet closes the round, and it was recorded as a raise to 0.
+ assert.deepEqual(record({bets:[0,76_508],stacks:[21_984,900_000],currentBet:76_508},{action:4}),{seq:70,street:1,seat:0,action:4});
+ assert.deepEqual(record({bets:[0,76_508],stacks:[76_508,900_000],currentBet:76_508},{action:4}),{seq:70,street:1,seat:0,action:4},'exactly the bet is still a call');
+ assert.deepEqual(record({bets:[10_000,20_000],stacks:[90_000,900_000],currentBet:20_000},{action:4}),{seq:70,street:1,seat:0,action:4,to:100_000},'it’s the total for the street');
+ assert.deepEqual(record({bets:[0,20_000],stacks:[900_000,900_000],currentBet:20_000},{action:3,amount:60_000}),{seq:70,street:1,seat:0,action:3,to:60_000});
+ assert.deepEqual(record({bets:[0,20_000],stacks:[900_000,900_000],currentBet:20_000},{action:2}),{seq:70,street:1,seat:0,action:2});
+ assert.equal(record({},{logical:4,wire:'00'}),undefined,'and a card share isn’t betting');
+ assert.deepEqual(describeResult({hand:1,winner:1,reason:3,stacks:[0,100],seat:0,cards:null,opponentCards:[],board:[],betting:[{seq:70,street:1,seat:0,action:4}]}).history,[{street:'flop',player:'you',action:'all-in'}]);
+});
+
 test('a real bet: whoever got called shows first and is never asked, and the caller decides',{timeout:120000},()=>{
  const pair=pairOf();
  const asked=play(pair,[betRiver,shows(true)]);

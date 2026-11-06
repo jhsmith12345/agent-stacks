@@ -55,9 +55,12 @@ function rpcConnection(url,commitment,timeoutMs){
   };
  }});
 }
+const isLocal=url=>['127.0.0.1','localhost','[::1]'].includes(new URL(url).hostname);
+// The RPC client returns numbers inside a transaction's error as BigInts, which JSON can't write.
+export const readable=value=>JSON.stringify(value,(_,v)=>typeof v==='bigint'?v.toString():v);
 export class ChainClient {
- constructor(url,program,wallet,{allowLocal=false,onTransaction=()=>{},commitment='confirmed',submitUrl=null,authorizeTransaction=async()=>{},releaseAuthorization=async()=>{},computeUnitPrice=async()=>0,rpcTimeoutMs=30_000}={}){this.url=url;this.program=program instanceof PublicKey?program:new PublicKey(program);this.wallet=wallet;this.allowLocal=allowLocal;this.commitment=commitment;this.connection=rpcConnection(url,commitment,rpcTimeoutMs);this.submissionConnection=submitUrl?rpcConnection(submitUrl,commitment,rpcTimeoutMs):null;this.authorizeTransaction=authorizeTransaction;this.releaseAuthorization=releaseAuthorization;this.computeUnitPrice=computeUnitPrice;this.onTransaction=onTransaction;this.networkChecked=false;}
- async checkNetwork(){const url=new URL(this.url);const local=['127.0.0.1','localhost','[::1]'].includes(url.hostname);if(url.protocol!=='https:'&&!(url.protocol==='http:'&&this.allowLocal&&local))throw Error('RPC requires HTTPS; HTTP is allowed only for an explicit local validator');const genesis=await this.connection.getGenesisHash();if(genesis!==DEVNET_GENESIS&&!(this.allowLocal&&local))throw Error('Refusing non-devnet RPC. Local validator requires explicit allowLocal.');this.genesis=genesis;this.networkChecked=true;return genesis;}
+ constructor(url,program,wallet,{allowLocal=false,onTransaction=()=>{},commitment='confirmed',submitUrl=null,authorizeTransaction=async()=>{},releaseAuthorization=async()=>{},computeUnitPrice=async()=>0,rpcTimeoutMs=30_000,confirmMs=null}={}){this.url=url;this.confirmMs=confirmMs;this.program=program instanceof PublicKey?program:new PublicKey(program);this.wallet=wallet;this.allowLocal=allowLocal;this.commitment=commitment;this.connection=rpcConnection(url,commitment,rpcTimeoutMs);this.submissionConnection=submitUrl?rpcConnection(submitUrl,commitment,rpcTimeoutMs):null;this.authorizeTransaction=authorizeTransaction;this.releaseAuthorization=releaseAuthorization;this.computeUnitPrice=computeUnitPrice;this.onTransaction=onTransaction;this.networkChecked=false;}
+ async checkNetwork(){const url=new URL(this.url);const local=isLocal(this.url);if(url.protocol!=='https:'&&!(url.protocol==='http:'&&this.allowLocal&&local))throw Error('RPC requires HTTPS; HTTP is allowed only for an explicit local validator');const genesis=await this.connection.getGenesisHash();if(genesis!==DEVNET_GENESIS&&!(this.allowLocal&&local))throw Error('Refusing non-devnet RPC. Local validator requires explicit allowLocal.');this.genesis=genesis;this.networkChecked=true;return genesis;}
  async validateMatch(id,info,config){const address=new PublicKey(id);if(!info){const error=Error(`Match ${id} is not visible at ${this.commitment} commitment yet; if it was just created, wait for it to finalize`);error.notYetVisible=true;throw error;}if(!info.owner.equals(this.program))throw Error('Match not owned by expected program');const m=decodeMatch(Buffer.from(info.data));const [pda,bump]=await PublicKey.findProgramAddress([Buffer.from('escrow'),new PublicKey(m.players[0]).toBytes(),m.nonce],this.program);if(!pda.equals(address)||bump!==m.bump)throw Error('Invalid match PDA');if(config&&(config.genesis!==this.genesis||config.program!==this.program.toBase58()||config.match!==address.toBase58()||config.terms!==termsHash(config)||m.terms!==config.terms||m.buyIn!==config.buyIn||m.turnSeconds!==config.turnSeconds||m.bigBlind!==config.bigBlind||m.maxHands!==(config.maxHands??1)||JSON.stringify(m.players)!==JSON.stringify(config.players)))throw Error('On-chain terms differ from accepted configuration');return m;}
  async match(id,config=null){if(!this.networkChecked)await this.checkNetwork();return this.validateMatch(id,await this.connection.getAccountInfo(new PublicKey(id),this.commitment),config);}
  async matchSnapshot(id,config,{minContextSlot=0}={}){
@@ -90,7 +93,7 @@ export class ChainClient {
  // visible in the node's confirmed bank; on-chain execution remains authoritative.
  async simulate(bytes){
   const {value}=await this.connection.simulateTransaction(VersionedTransaction.deserialize(bytes),{sigVerify:true,replaceRecentBlockhash:false,commitment:'processed'});
-  if(value.err)throw new Error(`Transaction rejected in simulation and not sent: ${JSON.stringify(value.err,(_,v)=>typeof v==='bigint'?v.toString():v)}`);
+  if(value.err)throw new Error(`Transaction rejected in simulation and not sent: ${readable(value.err)}`);
  }
  async submit(tx,{confirmation=this.commitment}={}){
   if(!this.networkChecked)await this.checkNetwork();
@@ -108,16 +111,22 @@ export class ChainClient {
   // Already simulated against the trusted node; a relay's own preflight adds only false failures.
   await sender.sendRawTransaction(bytes,{skipPreflight:true,maxRetries:3});
   const final=confirmation==='finalized';
-  const interval=final?250:this.allowLocal?25:400,attempts=Math.ceil((final?60_000:32_000)/interval),resendEvery=Math.ceil(3_000/interval);
-  for(let i=0;i<attempts;i++){
+  // Public RPCs allow a method only a few calls a second per address, and players at home can share an address.
+  // Going over costs far more than waiting: it's refused for 10 seconds, and the RPC library's retries don't wait that long.
+  const interval=isLocal(this.url)?25:1000;
+  // The limit is on time, not on polls, because a single refused poll can spend many seconds inside the RPC library.
+  // Giving up here is safe, since the caller reads the chain and carries on, and a move's clock is running.
+  const deadline=Date.now()+(this.confirmMs??(final?60_000:32_000));
+  let resent=Date.now();
+  while(Date.now()<deadline){
    // A failed poll says nothing about the transaction, so it must not abandon a healthy send.
    let status=null;
    try{status=(await this.connection.getSignatureStatuses([sig],{searchTransactionHistory:true})).value[0];}
    catch(error){if(!error.rpcFailure)throw error;}
    const settled=status&&(final?status.confirmationStatus==='finalized':['confirmed','finalized'].includes(status.confirmationStatus));
-   if(settled&&status.err){await this.onTransaction(sig,{status:'failed',error:status.err});throw Error(`Transaction ${sig} failed: ${JSON.stringify(status.err)}`);}
+   if(settled&&status.err){const reason=readable(status.err);await this.onTransaction(sig,{status:'failed',error:JSON.parse(reason)});throw Error(`Transaction ${sig} failed: ${reason}`);}
    if(settled){await this.onTransaction(sig,{status:'confirmed'});return sig;}
-   if(i%resendEvery===resendEvery-1)await sender.sendRawTransaction(bytes,{skipPreflight:true,maxRetries:0}).catch(error=>{if(!error.rpcFailure)throw error;});
+   if(Date.now()-resent>=3_000){resent=Date.now();await sender.sendRawTransaction(bytes,{skipPreflight:true,maxRetries:0}).catch(error=>{if(!error.rpcFailure)throw error;});}
    await setTimeout(interval);
   }
   const error=new Error(`Confirmation uncertain for ${sig}; inspect signature and current state before retrying`);error.signature=sig;throw error;

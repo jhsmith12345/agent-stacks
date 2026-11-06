@@ -4,13 +4,66 @@
 
 These test the [channel design](channel-design.md), where agents play through signed messages and the contract only settles disputes. Each player's agent runs as its own process, and they share only a manifest and a relay. Everything below uses test funds, ran on one Mac (some of it in two VMs), and hasn't been independently reviewed.
 
-The current channel-only build is `9ccfb8c5ab7684d4c23f489b26d4f30a399e55069a1520e6862ce399887f25b1`, 180,744 bytes. It's deployed on devnet at `DrUx4PvwUpW1mHPqhDM7Stabtx6JSyXycvtaZftGP1g4`, and the bytes dumped from chain match that hash. It's upgradeable by the project's devnet key, and the deploy took about 0.92 test SOL.
+Devnet runs the channel-only build `d73412687fab0376eb8bd74bb935a3b2b7388d8a979ee67bf2c3767dc03c8179`, 180,752 bytes, built on a Mac, at `DrUx4PvwUpW1mHPqhDM7Stabtx6JSyXycvtaZftGP1g4`. It was upgraded in place on 2026-11-06 to fix a contract bug found by the simulation below. Bytes dumped from chain match that hash, and the rest of the program's space, 190,984 bytes in all, is zeros. It's upgradeable by the project's devnet key. Unless a section says otherwise, the drills below ran on the earlier build, `9ccfb8c5ab7684d4c23f489b26d4f30a399e55069a1520e6862ce399887f25b1`.
 
-Showing and mucking changed the state format, so the earlier channel program, `GQkM4Uo4hPx8qL4UqkaoA8CZDUGR9GgvZxBaN46UNEGd`, can't run these rules. The first devnet program, `HJeuy3rTLNDktmMFGREW8nHoqFCLkfD8dYX3HPmA4FhJ`, was closed on 2026-11-05 to pay for this deploy, which returned 0.9487 test SOL. Its match account stays on chain, and its transactions stay readable until devnet prunes them, but the [first public devnet run](#first-public-devnet-run) can no longer be repeated against it.
+Showing and mucking changed the state format, so the earlier channel program, `GQkM4Uo4hPx8qL4UqkaoA8CZDUGR9GgvZxBaN46UNEGd`, couldn't run these rules. It was closed on 2026-11-06 to pay for the upgrade, which returned 0.906 test SOL. The first devnet program, `HJeuy3rTLNDktmMFGREW8nHoqFCLkfD8dYX3HPmA4FhJ`, was closed on 2026-11-05 to pay for the first deploy, which returned 0.9487 test SOL. Its match account stays on chain, and its transactions stay readable until devnet prunes them, but the [first public devnet run](#first-public-devnet-run) can no longer be repeated against it.
+
+### The upgrade and what it showed, 2026-11-06
+
+| Run, on public devnet and the fixed contract | Result |
+| --- | --- |
+| Forced all-in blind, over the relay | 3 transactions. The short player won double what it had put in |
+| Forced all-in blind, relay cut during the hole cards | 16 moves, 23 transactions, no restart, and payouts of 2,000,000 and 0. The contract took the state the earlier build refused |
+| Oregon and Belgium, the relay cut from Belgium | 339 seconds, 10 transactions, both reporting 980,000 and 1,020,000. It cost 0.00084 test SOL, and the VMs were deleted |
+
+These runs found two faults the local validator and the simulation hadn't, both now fixed:
+
+- **An agent could stall inside one transaction.** The wait for a confirmation allowed a set number of status checks, not a set time. A refused check spends about 8 seconds inside the RPC library's own retries, so at 400 ms between checks the wait could last about 10 minutes against a 60-second clock. Running the rehearsal on devnet with `AGENT_STACKS_ALLOW_LOCAL=1` made it far worse, because that flag also meant checking every 25 ms: both agents sat at `post state` for over 12 minutes, with about 390 retry lines each. The wait now has a time limit, and it checks once a second unless the RPC is on the same machine. The same scenario then needed no restart, with 4 and 22 retry lines. The public RPC refuses a method for 10 seconds when it's called too fast, and the library's retries don't wait that long.
+- **A guest could be left without a result.** Once the host retires a match, the account is only a tombstone, so a guest who hadn't read it yet saw no payouts. The money had already arrived: in that cloud run the chain shows 920,000 to the guest and 1,080,000 to the host, and the host retired 4 seconds later. The result now comes from the transaction that paid it, and if that history can't be read, the player is told their wallet balance instead. The `inviteresume` scenario now looks at a match after it has been retired.
+
+A third run also showed that formatting a failed transaction's error crashed, because the RPC client's error holds BigInts. That only hid the real message. Simulation errors, which the fallback depends on, were already handled.
+
+The upgrade itself took 16 seconds and about 0.92 test SOL, returned afterwards. The first attempt used `--use-rpc`, which the [note below](#first-public-devnet-run) already warned against, and failed after 305 seconds. By then the CLI had extended the program by 10,240 bytes, so about 0.052 test SOL stays with it. Giving `--buffer` an address alone doesn't resume a partial write, so that buffer was closed and a fresh one written from a keypair file. `scripts/channel.js deploy` refuses an existing program on purpose, so an upgrade is done with the Solana CLI directly.
+
+### Simulation: varied play with things going wrong, 2026-11-05
+
+The `soak` scenario in `scripts/channel-rehearsal.js` plays many matches at once with real agent processes, a real relay and a local validator. Stacks run from 10 to 500 big blinds. The bots are varied: `examples/solver-bot.js` in five styles and several sets of bet sizes, some with added noise, and a few that play at random.
+
+The solver estimates hand strength by simulation, then solves a small model of the rest of the hand with counterfactual regret minimisation, and samples from the mixed strategy. It's a testing tool, not a strong player.
+
+Six kinds of match, chosen at random: nothing going wrong, an agent killed and restarted mid-match, 12% of relay messages dropped, messages duplicated and reordered, the relay's memory wiped mid-match, and the relay dying for good, so the hand finishes on chain.
+
+After each match, every finished hand is checked by [a referee](../src/channel/referee.js) that shares no code with the engine or the contract. From the betting and the cards alone, using the project's older hand evaluator, it works out who won, who should have shown first, and what each stack should be. In disputed matches it skips the last hand, whose record may be partial. Wallet changes also have to match what the contract paid.
+
+| | |
+| --- | --- |
+| Matches | 260: 100 clean, 30 restarts, 21 with drops, 47 with duplicates and reordering, 21 with the relay wiped, 41 with the relay gone |
+| Hands judged | 853: 297 ended by a fold, 264 at showdown, 292 by a muck. 17 split pots, and 14 winning hands mucked on purpose |
+| Betting | 1,529 raises, 175 all-ins, 228 hands with a re-raise, 59 with three or more raises on a street, and 20 all-ins below the minimum raise |
+| On chain | 30 disputes, 322 moves |
+| Agent restarts | 51 |
+| Messages refused | 3,629, all of them late resends of a key or a shuffle |
+
+The first batch of 80 failed once, which found the wrong betting record below. The next two, of 120 and 60, passed with no failures. Only the last 60 ran on the fixed contract.
+
+### Forcing a rare case
+
+The all-in blind hand never came up by chance in those 853 hands, so the `shortblind` scenario forces it. Hand 1 leaves a player with 50,000 against a 100,000 big blind, and hand 2 starts with that player all-in, with no betting at all. Over the relay, it settled normally in 3 transactions. With the relay cut once hand 2's cards start going out, it hung, because the contract refused the state. That's the serious fault below. With the fix, it finished on chain: 16 moves, 21 transactions, and the short player won exactly double what it had put in.
+
+### Two regions, 2026-11-05
+
+`scripts/channel-cloud-rehearsal.js` plays between two brand-new Google Cloud VMs, one in Oregon and one in Belgium, on public devnet through the relay in Iowa. Each installs Node and the project from nothing and has its own wallet, RPC connection and clock. They share only the invite code, and they're deleted at the end. Both played the solver bot. This ran on the earlier build, before the fixes below.
+
+| Run | Result |
+| --- | --- |
+| Clean | 5 hands with re-raises and all-ins, ending in a bust, about 5 minutes after the install, with no dispute. The referee found no faults |
+| The relay cut from Belgium mid-hand | Both finished the hand on chain: 7 and 12 transactions from the two agents, 24 on the match, 408 seconds in all |
+
+Sweeping the VMs' funds back afterwards, the cut run cost 0.00098 test SOL.
 
 ### Two VMs, public devnet, current rules, 2026-11-05
 
-`scripts/channel-vm-rehearsal.js` plays between two Lima VMs running Alpine Linux, each with its own kernel, disk and keys, and no shared folders. The relay runs on the host. Every match here was on `DrUx4Pvw…`.
+`scripts/channel-vm-rehearsal.js` plays between two Lima VMs running Alpine Linux, each with its own kernel, disk and keys, and no shared folders. The relay runs on the host. Every match here was on `DrUx4Pvw…`, before its upgrade.
 
 | Drill | What happens | Result |
 | --- | --- | --- |
@@ -33,7 +86,7 @@ The two VMs still share one home network and one public address. Only the relay 
 
 ### Public devnet, earlier build, 2026-11-05
 
-Program `GQkM4Uo4hPx8qL4UqkaoA8CZDUGR9GgvZxBaN46UNEGd`, the channel-only build. Bytes dumped from chain matched `e0a2d27106d29706a393ac2a5ffa732d263ba39828b35470de66a5b2433b5a62`. It's upgradeable, with the project payer as authority, so it isn't trustless yet. Deploying took 16 seconds and 0.9075 test SOL.
+Program `GQkM4Uo4hPx8qL4UqkaoA8CZDUGR9GgvZxBaN46UNEGd`, the channel-only build, since closed. Bytes dumped from chain matched `e0a2d27106d29706a393ac2a5ffa732d263ba39828b35470de66a5b2433b5a62`. It's upgradeable, with the project payer as authority, so it isn't trustless yet. Deploying took 16 seconds and 0.9075 test SOL.
 
 | Run | Match | Result |
 | --- | --- | --- |
@@ -81,7 +134,7 @@ The older path needed 57 minutes and about 2,900 transactions for 2 hands in its
 ### Automated checks
 
 - **Engine against contract:** 600 random betting games and 3,000 hand rankings match byte for byte, including illegal moves. A whole hand with real keys, shuffles and proofs matches at every step in the SBF VM.
-- **Tests:** 35 for the contract in the VM, also run against the channel-only build. 49 for the agent and its dispute decisions, 38 for connecting a decision program, 11 for the invite, 19 for the relay's limits and sealing, and 2 for the fairness of the deal.
+- **Tests:** 37 for the contract in the VM, also run against the channel-only build. 52 for the agent and its dispute decisions, 39 for connecting a decision program, 11 for the invite, 19 for the relay's limits and sealing, 12 for the referee, 9 for the solver, and 2 for the fairness of the deal.
 - **Fair deal:** across 52,000 shuffles every card is equally likely in every position, and across 30,000 deals dealt the way a match deals them neither seat wins more often and ties come up at about the real hold'em rate. Both run on every test pass, with limits six standard deviations out. This checks the shuffle and hand ranking, not the mental-poker encryption around them.
 - **Compute:** at most 97,988 units for a share move and 7,069 for a betting move.
 
@@ -93,9 +146,10 @@ Mutation checks break one rule at a time in a scratch copy and confirm a test fa
 | Agent | 31 of 32 | Co-signing with its own move pending: the one-signature-per-step rule also stops it |
 | Dispute decisions | 16 of 16 | |
 | Relay limits and sealing | 39 of 39 | The first run caught 37: nothing checked that dropped messages left the memory total, or that nonces never repeat. Both have tests now |
+| Reading payouts from history, and the confirmation wait | 15 of 15 | The first run on payouts caught 4 of 7: its running total hid two faults, so the code got simpler and the test stricter |
 | Decision programs and invites | 72 of 74 | An answer meant for an earlier question: the check that asks the question also stops it. Offering a raise after already acting: heads-up play can't reach that state, because the only raise that doesn't reopen the betting is an all-in, which leaves nobody to raise against |
 
-The first mutation runs caught only about half: 32 of 48 in the contract and 11 of 22 in the agent. Most misses were tests failing for the wrong reason. The rollback test, for example, used bad signatures, so it passed even with the window rule removed. Those tests were rewritten. The first run on decision programs and invites caught 62 of 72, and most of those misses got better tests too. The `stacks` command itself isn't under mutation: its checks are covered by the invite scenarios above.
+The first mutation runs caught only about half: 32 of 48 in the contract and 11 of 22 in the agent. Most misses were tests failing for the wrong reason. The rollback test, for example, used bad signatures, so it passed even with the window rule removed. Those tests were rewritten. The first run on decision programs and invites caught 62 of 72, and most of those misses got better tests too. The `stacks` command itself isn't under mutation: its checks are covered by the invite scenarios above. Nor are the referee, the solver or the agents' fallback yet.
 
 ### Faults found by this work
 
@@ -116,6 +170,13 @@ The VM drills then found these, none of which showed up with both agents on one 
 - **A power cut emptied the manifest and the lock file.** The agent now keeps a durable copy of the terms, flushes its lock to disk, and takes over a lock only when its holder is provably gone.
 - **A session key without enough SOL couldn't post a state, so it couldn't defend its player.** Setup now refuses a reserve too small for that, unless overridden.
 
+The simulation and forced cases then found these:
+
+- **A hand state the contract refused to accept (serious).** With a player all-in from a blind, no betting happens, so the game is already waiting on the board while the hole cards go out. The contract assumed it would be betting then, and refused the state. A dispute during those few steps couldn't be posted, and both agents would retry forever with the deposits stuck. Funds couldn't be stolen, but on an immutable contract they'd have been stuck for good. It's fixed, and a new test posts every state of 9 kinds of hand, over 200 in all. Agents also fall back now: if the contract keeps refusing their newest state, they post the last stacks both agreed, or the original deposits, which gives up only the hand in progress.
+- **The betting record told agents the wrong thing.** An all-in for less than the current bet closes the round, and the record said `to: 0`, because it read the bet level after the round had reset. The money was right. A decision program would have been told the opponent raised to 0. The referee caught it.
+
+Three of my own mistakes while building this are worth knowing about. The cloud script waited on an empty report, which JavaScript treats as false, so it would have run until its timeout, though it would still have deleted its VMs. A fault injector mixed up the two directions of traffic, which delivered players their own messages. And a validator ledger grew to 12 GB and filled the Mac's disk, which is why the rehearsal now caps it and watches free space.
+
 Playing with real decisions then found these:
 
 - **Agents bounced acknowledgements back and forth forever.** A resent acknowledgement got one in reply, which got another, and each 5-second resend added one more. Matches moved fast enough to hide it, but a slow agent would have flooded the relay. A reply is now marked, and a marked reply gets no answer.
@@ -125,10 +186,13 @@ Playing with real decisions then found these:
 - **A decider with no `tell` method hung the runner.** An optional call skipped the increment inside its own argument, so the loop never ended. Only a test double could hit this, and a test found it.
 - **The first help text said all but the stake and small fees comes back.** The host also leaves a permanent tombstone of about 0.001 SOL, and the text now says so.
 
+Running on public devnet after the upgrade then found two more: an agent stalling inside a single transaction, and a guest left without a result. Both are [described above](#the-upgrade-and-what-it-showed-2026-11-06).
+
 ### What this doesn't show
 
-- It hasn't run on two physical machines. Two VMs on one Mac share a host, a network path and a clock source.
-- No real agent has played. Every match used the simple styles in `examples/decision-bot.js`, and no language model or person has used the interface or the invite.
+- No language model or person has used the interface or the invite. Every match used `examples/solver-bot.js` or the simple styles in `examples/decision-bot.js`.
+- Linux and macOS only. The code assumes process groups and Unix file permissions, so Windows probably doesn't work.
+- The solver is a weak player, so it says little about what a strong one would do to the rules. Random play and noise cover some of that.
 - The relay has no matchmaking. It's been on the public internet for hours, not weeks, and its limits have only been tested locally, not under a real flood.
 - The deployed program is upgradeable, so the "deployer" row in the design doesn't hold yet.
 - Nobody independent has reviewed this design or code.

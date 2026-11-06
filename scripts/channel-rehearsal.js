@@ -7,7 +7,7 @@ import {spawn} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {createServer} from 'node:http';
 import {once} from 'node:events';
-import {mkdirSync,readdirSync,readFileSync,writeFileSync} from 'node:fs';
+import {appendFileSync,mkdirSync,readdirSync,readFileSync,writeFileSync} from 'node:fs';
 import {resolve,join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {setTimeout as pause} from 'node:timers/promises';
@@ -18,6 +18,8 @@ import {startRelay} from '../src/channel/relay.js';
 import {KIND_HAND,sha256,signedMessage} from '../src/channel/engine.js';
 import {toHex} from '../src/channel/wire.js';
 import {decodeInvite} from '../src/channel/invite.js';
+import {coverage,referee} from '../src/channel/referee.js';
+import {seededRandom} from '../src/channel/solver.js';
 const [rpc,program,funderFile,workArg,...only]=process.argv.slice(2);
 if(!rpc||!program||!funderFile||!workArg)throw Error('Usage: node scripts/channel-rehearsal.js RPC PROGRAM_ID FUNDER_KEYPAIR WORK_DIRECTORY [SCENARIO...]');
 const root=fileURLToPath(new URL('..',import.meta.url)),work=resolve(workArg);
@@ -51,7 +53,8 @@ function agent(m,seat,relayUrl,{rpcUrl=rpc,stall=20,poll=POLL,decide=null,think=
  const label=seat===0?'a':'b';
  const child=spawn(process.execPath,[join(root,'examples/channel-agent.js'),m.file(`session-${label}.json`),m.file(`state-${label}`),'--manifest',m.file('manifest.json'),'--relay',relayUrl,'--rpc',rpcUrl,...(decide?['--decide',decide,'--think',String(think)]:[])],{cwd:root,env:{...ENV,AGENT_STACKS_STALL_SECONDS:String(stall),AGENT_STACKS_POLL_SECONDS:String(poll)},stdio:['ignore','pipe','pipe']});
  const a={child,out:'',err:'',exit:null,seat};
- child.stdout.on('data',d=>{a.out+=d;});child.stderr.on('data',d=>{a.err+=d;});
+ // On disk too, because a run that times out has nothing else to show why.
+ child.stdout.on('data',d=>{a.out+=d;});child.stderr.on('data',d=>{a.err+=d;appendFileSync(m.file(`agent-${label}.log`),d);});
  a.done=new Promise(done=>child.on('exit',(code,signal)=>{a.exit={code,signal};done(a.exit);}));
  return a;
 }
@@ -83,7 +86,6 @@ function checkResults(m,state,agents){
  return records[0];
 }
 const raises=r=>r.betting.filter(e=>e.action===3||e.action===4).length;
-
 // The one-command way in, as two people would use it. Only the code passes between them.
 const ARTIFACT=resolve(process.env.AGENT_STACKS_PROGRAM_SO??join(root,'target/deploy-channel/agent_stacks_escrow.so'));
 function stacks(dir,home,args,{extraEnv={}}={}){
@@ -276,7 +278,7 @@ const SCENARIOS={
  async inviteresume(){
   const {dir}=await inviteSetup('inviteresume');
   const relay=await startRelay();
-  let host,guest,again;
+  let host,guest,again,late;
   try{
    ({host}=await hosted(dir,['--relay',relay.url,'--buy-in','0.001','--hands','2','--clock','600','--think','10','--decide',bot('call')]));
    const code=host.out.split('\n').find(l=>l.startsWith('stacks1.'));
@@ -291,8 +293,16 @@ const SCENARIOS={
    assert(exits.every(e=>e.code===0),`exited ${JSON.stringify(exits)}: ${host.err.slice(-400)} | ${again.err.slice(-400)}`);
    const [a,b]=[lastJson(host),lastJson(again)];
    assert(a.payouts[0]===b.payouts[0],'both report the same result');
-   return {payouts:a.payouts,hands:a.results.length};
-  }finally{for(const p of [host,guest,again])if(p&&p.exit===null)p.child.kill('SIGKILL');relay.close();}
+   // The host has retired the match by now, so the account can't say what anyone won. A guest who looks later still finds out.
+   const info=await direct.connection.getAccountInfo(new PublicKey(a.match),'confirmed');
+   assert(info?.data.length===8,'the match is retired');
+   late=stacks(dir,'home-b',['resume',code,'--decide',bot('call')]);
+   const [lateExit]=await withTimeout(Promise.all([late.done]),120_000,'a late resume');
+   assert(lateExit.code===0,`the late resume exited ${JSON.stringify(lateExit)}: ${late.err.slice(-400)}`);
+   const seen=lastJson(late).payouts;
+   assert(seen?.[0]===a.payouts[0]&&seen?.[1]===a.payouts[1],`a late look finds the same result: ${seen} against ${a.payouts}`);
+   return {payouts:a.payouts,hands:a.results.length,afterRetiring:seen};
+  }finally{for(const p of [host,guest,again,late])if(p&&p.exit===null)p.child.kill('SIGKILL');relay.close();}
  },
  // A code that points at a contract this player doesn't trust. No money moves, and nothing is offered.
  async invitebadcontract(){
@@ -320,6 +330,149 @@ const SCENARIOS={
    assert((relay.boxes.get(`${decodeInvite(code).id}/0`)?.items.length??0)===0,'and the host heard nothing');
    return {refused:true};
   }finally{if(host&&host.exit===null)host.child.kill('SIGKILL');relay.close();}
+ },
+ // Many matches at varied stack depths, with bots that play differently, and with things going wrong. After
+ // each one, every finished hand has to agree with a referee that shares no code with the engine or contract.
+ // SOAK_MATCHES and SOAK_WORKERS set the size, and SOAK_SEED makes a run repeatable.
+ async soak(){
+  const total=Number(process.env.SOAK_MATCHES??24),workers=Number(process.env.SOAK_WORKERS??5),base=Number(process.env.SOAK_SEED??Date.now()%1_000_000);
+  const seen={},failures=[],kinds={};let finished=0;
+  const LATE_RESEND=new Set(['Key is not due','Key already recorded','Shuffle is not due','Move is not due','Acknowledgement is not due']);
+  const solver=(seed,style,extra='')=>`${JSON.stringify(process.execPath)} examples/solver-bot.js --seed ${seed} --style ${style} ${extra}`.trim();
+  const STYLES=['balanced','tight','loose','aggressive','passive'];
+  async function one(index){
+   const seed=base+index*7919;
+   const rng=seededRandom(seed),pick=list=>list[Math.floor(rng()*list.length)];
+   const kind=pick(['none','none','none','none','restart','restart','mess','mess','drop','cut','cut','wipe']);
+   const bigBlind=pick([2_000,10_000,20_000,50_000,100_000]),hands=3+Math.floor(rng()*6),seconds=kind==='cut'?90:600;
+   const sizes=pick(['0.33,0.75,1.5','0.5,1','0.25,0.66,1,2','0.75']),noise=pick([0,0,0.05,0.1]);
+   const bots=[0,1].map(i=>rng()<0.15?bot('random','--seed',seed+i):solver(seed+i,pick(STYLES),`--sizes ${sizes} --noise ${noise} --show ${pick(['default','default','sometimes'])}`));
+   const label=`match ${index} (seed ${seed}, ${kind}, ${bigBlind} big blind, ${hands} hands)`;
+   kinds[kind]=(kinds[kind]??0)+1;
+   const m=await setup(`soak-${index}`,{hands,seconds,bigBlind});
+   const held=[[],[]];let messages=0,cut=false,relayRef=null,wipeAt=20+Math.floor(rng()*200),cutAt=20+Math.floor(rng()*160);
+   const tap=(seat,body)=>{
+    messages++;
+    if(kind==='cut'){if(messages>cutAt)cut=true;return cut?[]:[body];}
+    if(kind==='drop')return rng()<0.12?[]:[body];
+    if(kind==='wipe'&&messages===wipeAt){relayRef.boxes.clear();return [body];}
+    if(kind==='mess'){
+     const roll=rng();
+     if(roll<0.1)return [body,body];
+     if(roll<0.2&&held[seat].length<8){held[seat].push(body);return [];}
+     const out=[body,...held[seat]];held[seat].length=0;return out;
+    }
+    return [body];
+   };
+   const relay=await startRelay({tap});relayRef=relay;
+   const options=seat=>({stall:kind==='cut'?20:90,decide:bots[seat],think:5});
+   const agents=[agent(m,0,relay.url,options(0)),agent(m,1,relay.url,options(1))];
+   let stopped=false,restarting=false;const running=[];
+   // The state files only exist once play has begun, so a restart lands mid-match.
+   if(kind==='restart')running.push((async()=>{
+    for(let time=0;time<2&&!stopped;time++){
+     await pause(15_000+rng()*40_000);
+     const seat=rng()<0.5?0:1;
+     if(stopped||agents[seat].exit)return;
+     restarting=true;
+     agents[seat].child.kill('SIGKILL');await agents[seat].done;
+     await pause(500+rng()*4000);
+     agents[seat]=agent(m,seat,relay.url,options(seat));
+     restarting=false;
+     seen.restarts=(seen.restarts??0)+1;
+    }
+   })());
+   try{
+    const deadline=Date.now()+1_500_000;
+    // A restart replaces an agent, so this always waits on whichever is current.
+    for(;;){
+     if(!restarting&&agents.every(a=>a.exit))break;
+     if(Date.now()>deadline)throw Error('Timed out');
+     await pause(500);
+    }
+    stopped=true;await Promise.all(running);
+    assert(agents.every(a=>a.exit.code===0),`agents exited ${JSON.stringify(agents.map(a=>a.exit))}: ${agents.map(a=>a.err.slice(-400)).join(' | ')}`);
+    const state=await settled(m,120_000),finals=agents.map(finalOf);
+    assert(state.payouts[0]+state.payouts[1]===2*m.manifest.buyIn,`payouts add up: ${state.payouts}`);
+    const onChain=await matchTransactions(m);
+    const disputed=onChain>4;
+    if(disputed){seen['disputed matches']=(seen['disputed matches']??0)+1;seen['on-chain moves']=(seen['on-chain moves']??0)+agents.flatMap(a=>a.err.split('\n').filter(l=>l.includes('on-chain move'))).length;}
+    const walletDeltas=await delta(m);
+    assert(walletDeltas[0]===state.payouts[0]&&walletDeltas[1]===state.payouts[1],`wallets got what the contract paid: ${walletDeltas} and ${state.payouts}`);
+    // Match up what each side recorded. A hand that ended on chain may be recorded by only one of them.
+    const pairs=finals[0].results.flatMap(r=>{const o=finals[1].results.find(x=>x.hand===r.hand);return o?[[r,o]]:[];});
+    for(const [a,b] of pairs)for(const field of ['winner','reason','aggressor','firstToShow'])assert(a[field]===b[field],`hand ${a.hand}: both agree on ${field}: ${a[field]} and ${b[field]}`);
+    const clean=disputed?pairs.slice(0,-1):pairs;
+    const faults=referee(m.manifest.buyIn,bigBlind,clean);
+    assert(!faults.length,faults.join('; '));
+    if(!disputed){
+     const last=pairs.at(-1)?.[0];
+     assert(last&&state.payouts[0]===last.stacks[0]&&state.payouts[1]===last.stacks[1],`the contract paid what the last hand left: ${state.payouts} and ${last?.stacks}`);
+     assert(finals[0].results.length===finals[1].results.length,'both recorded every hand');
+    }
+    if(kind==='none'){
+     assert(!disputed,`nothing went wrong, but it went to the chain: ${onChain} transactions`);
+     assert(agents.every(a=>!/isn’t allowed|didn’t answer|exited/.test(a.err)),`no decision failed: ${agents.map(a=>a.err.slice(-300)).join(' | ')}`);
+    }
+    // Every rejection has to be something a resend that arrived late would cause. Anything else is a bug or an attack.
+    for(const f of finals)for(const [why,count] of Object.entries(f.rejectedWhy??{})){
+     seen[`rejected: ${why}`]=(seen[`rejected: ${why}`]??0)+count;
+     assert(LATE_RESEND.has(why),`rejected a message for an unexpected reason: ${why} (${count})`);
+    }
+    coverage(seen,clean,bigBlind);
+    finished++;log(`${label}: passed with ${pairs.length} hands, ${onChain} transactions (${finished} done, ${failures.length} failed)`);
+   }catch(error){
+    failures.push({label,error:error.message.slice(0,1200),directory:m.dir,logs:agents.map(a=>a.err.slice(-1500))});
+    log(`${label}: FAILED: ${error.message.slice(0,400)}`);
+   }finally{stopped=true;await Promise.all(running).catch(()=>{});stop(...agents);relay.close();}
+  }
+  let next=0;
+  await Promise.all(Array.from({length:workers},async()=>{for(;;){const index=next++;if(index>=total)return;await one(index).catch(error=>{failures.push({label:`match ${index}`,error:error.message});log(`match ${index}: setup failed: ${error.message.slice(0,300)}`);});}}));
+  writeFileSync(join(work,`soak-${base}.json`),JSON.stringify({base,total,kinds,seen,failures},null,1));
+  assert(!failures.length,`${failures.length} of ${total} matches failed; first: ${failures[0]?.label}: ${failures[0]?.error}`);
+  return {base,matches:total,faults:kinds,seen};
+ },
+ // A player too short to pay the blind in full. Hand 1 leaves one player with 50,000 against a 100,000 big blind,
+ // so hand 2 starts with that player all-in on the blind, and the board runs out with no betting at all.
+ // It's played over the relay, and then with the relay cut as hand 2 begins, so the contract has to do it too.
+ async shortblind(){
+  const results={};
+  for(const onChain of [false,true]){
+   const m=await setup(`shortblind-${onChain?'chain':'relay'}`,{hands:3,seconds:60,bigBlind:100_000});
+   let cut=false,after=0;
+   const relay=await startRelay({tap:(_seat,body)=>{
+    if(!onChain)return [body];
+    if(!after&&body.includes('"type":"key"')&&body.includes('"hand":2'))after=1;
+    // Late enough that both have signed hand 2. Any sooner and it correctly settles at hand 1's stacks.
+    else if(after&&++after>13)cut=true;
+    return cut?[]:[body];
+   }});
+   const a=agent(m,0,relay.url,{stall:20,decide:bot('plan','--to','950000')}),b=agent(m,1,relay.url,{stall:20,decide:bot('call')});
+   try{
+    const exits=await withTimeout(Promise.all([a.done,b.done]),Number(process.env.AGENT_STACKS_SHORTBLIND_SECONDS??420)*1000,'short blind');
+    assert(exits.every(e=>e.code===0),`agents exited ${JSON.stringify(exits)}: ${a.err.slice(-300)} | ${b.err.slice(-300)}`);
+    const state=await settled(m),finals=[a,b].map(finalOf);
+    assert(state.payouts[0]+state.payouts[1]===2*m.manifest.buyIn,`payouts add up: ${state.payouts}`);
+    const pairs=finals[0].results.flatMap(r=>{const o=finals[1].results.find(x=>x.hand===r.hand);return o?[[r,o]]:[];});
+    const [first,second]=pairs;
+    assert(first&&Math.min(...first[0].stacks)===50_000||first?.[0].winner===2,`hand 1 left someone short: ${first?.[0].stacks}`);
+    if(first[0].winner===2){results[onChain?'chain':'relay']={skipped:'hand 1 split the pot'};continue;}
+    const moves=[a,b].flatMap(x=>x.err.split('\n').filter(l=>l.includes('on-chain move'))).length;
+    if(onChain)assert(cut&&moves>0,`it went to the chain: cut ${cut}, ${moves} moves`);
+    // On chain the contract's word is the result, and the last hand needn't be recorded by both.
+    if(second){
+     assert(second[0].betting.length===0,`hand 2 had no betting: ${JSON.stringify(second[0].betting)}`);
+     assert(second[0].board.length===5,'the board ran out');
+     const faults=referee(m.manifest.buyIn,100_000,onChain?[first]:pairs);
+     assert(!faults.length,faults.join('; '));
+    }
+    const shortSeat=first[0].stacks[0]<first[0].stacks[1]?0:1;
+    const possible=[50_000*2,50_000,0];
+    assert(possible.includes(state.payouts[shortSeat]),`the short player can win at most what it put in: ${state.payouts}`);
+    results[onChain?'chain':'relay']={payouts:state.payouts,hand2:second?['fold','showdown','forfeit','muck'][second[0].reason]:'settled on chain',moves,transactions:await matchTransactions(m)};
+   }finally{stop(a,b);relay.close();}
+  }
+  return results;
  },
  // A player posts an old state hoping the other is asleep. The other's newest state must win.
  async stale(){
@@ -411,7 +564,7 @@ const SCENARIOS={
 };
 const summary={};
 for(const name of Object.keys(SCENARIOS)){
- if(only.length&&!only.includes(name))continue;
+ if(only.length?!only.includes(name):name==='soak')continue;
  log(`scenario ${name}`);
  try{summary[name]={ok:true,...await SCENARIOS[name]()};log(`${name}: passed`);}
  catch(error){summary[name]={ok:false,error:error.message};log(`${name}: FAILED: ${error.message}`);}

@@ -80,7 +80,7 @@ A line like this needs no reply. It's there so your agent can learn from what ha
 
 ## A small agent
 
-[`examples/decision-bot.js`](../examples/decision-bot.js) is a working one, with a few simple styles. The whole job looks like this in Python:
+[`examples/decision-bot.js`](../examples/decision-bot.js) is a working one, with a few simple styles. [`examples/solver-bot.js`](../examples/solver-bot.js) is a step up: a simple solver with value bets, bluffs and varied sizes, though it isn't strong. The whole job looks like this in Python:
 
 ```python
 import json, sys

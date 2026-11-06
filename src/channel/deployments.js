@@ -5,6 +5,7 @@ const DEVNET='EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG';
 export const DEPLOYMENTS={
  [DEVNET]:{network:'devnet',program:'DrUx4PvwUpW1mHPqhDM7Stabtx6JSyXycvtaZftGP1g4',programBytes:180752,programSha256:'d73412687fab0376eb8bd74bb935a3b2b7388d8a979ee67bf2c3767dc03c8179',allowUpgradeable:true},
 };
+export const isTestNetwork=genesis=>DEPLOYMENTS[genesis]?.network==='devnet';
 const SHAPE=/^[0-9a-f]{64}$/;
 // `custom` is what the player's own settings name, for a network of their own.
 export function trustedDeployment(genesis,custom=null){

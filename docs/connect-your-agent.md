@@ -1,26 +1,72 @@
 # Connecting your agent
 
-Your agent is any program that can read a line and write a line. It makes the poker decisions. Everything else stays with Agent Stacks, which keeps the keys, checks every message, enforces the rules and watches the chain. Your agent never sees a key, and it can't break the rules, because anything it says is only a proposal.
+Your agent makes the poker decisions. Everything else stays with Agent Stacks, which keeps the keys, checks every message, enforces the rules and watches the chain. Your agent never sees a key, and it can't break the rules, because anything it says is only a proposal.
+
+There are two ways to connect one:
+
+- **Turn by turn.** Any agent that can run shell commands can play with no code at all: it runs `next` to see each decision and `move` to answer it. See [Turn by turn](#turn-by-turn).
+- **A decision program.** Anything that can read a line and write a line, in any language, makes the decisions by itself, much faster. See [What your program is told](#what-your-program-is-told).
 
 ## Play a match
 
-The host needs a relay that both players can reach (see [Relays](#relays)), and each player runs one command:
+The host needs a relay that both players can reach (see [Relays](#relays)), and each player runs one command. Without `--decide`, the match runs in the background and the command returns, ready for `next` and `move`:
 
 ```bash
-npm run stacks -- host --relay http://relay.example:8787 --buy-in 0.001 --decide "python my_agent.py"
+node scripts/stacks.js host --relay http://relay.example:8787 --buy-in 0.001 --think 300 --fund-guest
 ```
 
-That prints a code starting with `stacks1.`, which the host sends to the other player. Anyone holding the code can take the seat, once, so send it privately. The other player runs:
+Or with a program making the decisions, in which case the command keeps running until the match is over:
 
 ```bash
-npm run stacks -- join stacks1.abc... --decide "node my-agent.js"
+node scripts/stacks.js host --relay http://relay.example:8787 --buy-in 0.001 --decide "python my_agent.py"
 ```
 
-They see the terms and are asked to confirm. Then both sides make their deposits, play, get paid, and get back whatever wasn't part of the result. Each player's wallet is created under `.agent-stacks/play` on first use, and the command says how much to send it. Pass `--wallet FILE` to use your own.
+Either way, that prints a code starting with `stacks1.`, along with a message to send to the other player. Anyone holding the code can take the seat, once, so send it privately. The other player runs:
 
-If a player's machine crashes or loses its connection, they run `npm run stacks -- resume stacks1.abc...` with the same code. Nothing is lost if it's back before the clock runs out on a disputed hand.
+```bash
+node scripts/stacks.js join stacks1.abc...
+node scripts/stacks.js join stacks1.abc... --decide "node my-agent.js"
+```
+
+They see the terms and are asked to confirm, or they can accept them up front with `--yes`. Then both sides make their deposits, play, get paid, and get back whatever wasn't part of the result.
+
+Each player's wallet is created under `.agent-stacks/play` on first use. Pass `--wallet FILE` to use your own, and `--home DIRECTORY` to keep everything somewhere else.
+
+`--fund-guest` has the host send the other player's wallet what it needs when they connect, so they don't have to find test SOL. It only works on devnet, and what's sent stays with them. Without it, the guest's software says how much to send and where, and the host waits, with no deposit made, until the guest's wallet can match it.
+
+If a player's machine crashes or loses its connection, they run the same thing with `resume`, using the same `--decide` if there was one: `node scripts/stacks.js resume stacks1.abc...`. When playing turn by turn, the code isn't needed. Nothing is lost if it's back before the clock runs out on a disputed hand.
 
 Today this runs on devnet with test SOL only. The software has no trusted contract for mainnet, and it refuses to play there.
+
+## Turn by turn
+
+An agent running in a shell can't keep one command open for a whole match, and doesn't need to:
+
+```bash
+node scripts/stacks.js next
+node scripts/stacks.js move 2/17 raise 60000
+```
+
+`next` prints one line of JSON, and its `type` says what to do. It returns as soon as there's something to report, or after `--wait` seconds, 60 by default. A shell that cuts it off sooner does no harm, because only `move` changes anything.
+
+| `type` | What it means |
+| --- | --- |
+| `waiting` | Nothing to decide yet. `status` is the match's latest log line, and `note` says to run `next` again |
+| `bet`, `show` | A decision, in the same form a program gets (see below), with a string `id`, `secondsLeft`, and the exact `moves` that would answer it |
+| `stopped` | The match process has died. `reason` is its last log line, and `resume` is the command that brings it back |
+| `over` | Finished. `summary` says how it went, with `started`, `finished` and `walletBalance` in lamports |
+
+`move ID WORD` answers a decision, where `WORD` is `fold`, `check`, `call`, `raise TO`, `bet TO`, `all-in`, `show` or `muck`. It then waits just like `next` and prints the same thing, with `moved` added, so the usual loop is one `next` and then a `move` at a time until `over`.
+
+A move that isn't allowed exits with an error saying why, and the decision stays open. A move naming a decision that has passed is refused too, so a slow answer can't land on the next decision.
+
+If `secondsLeft` runs out, the safe default applies, and the match carries on. Each result can carry `since`, a list of what's happened since the last look: `result` lines for hands that ended, and `missed` lines for decisions that went by, with what was played instead.
+
+Each model turn and shell command takes time, so give these matches `--think 300`, which also needs `--clock` of at least 600. A shorter limit means missed decisions, and `join` warns about one under 60 seconds.
+
+The match process runs in the background and logs to `log.txt` in the match's folder. If your environment kills background processes when a command ends, run `join` or `resume` with `--foreground` in whatever it does offer for long-running commands, and use `next` and `move` from another.
+
+`--check-call` plays without any decisions at all, by checking and calling. It's useful for testing.
 
 ## What your program is told
 
@@ -98,7 +144,26 @@ for line in sys.stdin:
 
 Remember to flush after each line, and to send anything you want to log to stderr, because stdout is only for replies. Agent Stacks keeps what you write to stderr in its own log.
 
-To use a language model, send it the question and ask for the reply format. Make sure it can answer within the time limit, and check its reply is valid JSON before printing it, so a rambling answer doesn't cost you a turn.
+### It's checked before the match
+
+Before any money moves, `host` and `join` start your program and ask it two practice questions, one of each kind, with `hand` set to 0. It has to answer them within the `--think` limit with moves the rules allow. If it doesn't, the command stops and shows what your program said, and nothing has been spent. Your program is then stopped, and started afresh for the match. `resume` doesn't check again.
+
+If your program has a fallback of its own, so that it can still give a valid answer when it can't really decide, add `"failed":true` to that reply. It makes no difference during a match, but in a practice question it stops the match from starting.
+
+To use a language model, [`examples/llm-bot.js`](../examples/llm-bot.js) is ready to run:
+
+```bash
+node examples/llm-bot.js --check
+node scripts/stacks.js host --relay http://relay.example:8787 --buy-in 0.001 --think 60 --decide "node examples/llm-bot.js"
+```
+
+It uses the Anthropic API if `ANTHROPIC_API_KEY` is set, which needs `npm install @anthropic-ai/sdk` if you installed with `--omit=dev`. Otherwise it uses the login of the `claude` command, with all its tools and settings turned off. `--model` and `--effort` choose the model and how hard it thinks, and `--log FILE` keeps every decision, including your own cards, in a file only you can read.
+
+`host` and `join` won't start if the model can't answer the practice questions, say because a login expired. If it stops answering during a match, the bot gives the safe default, and that folds to every bet. The match carries on, so all you'd see is a line in the log. `--check` asks one sample question without starting anything.
+
+With an API key, requests allow the API's server-side fallbacks, so if the model you chose is unavailable, another may answer. That route has only been run against a stand-in server so far.
+
+To write your own, send the model the question and ask for the reply format. Make sure it can answer within the time limit, and check its reply is valid JSON before printing it, so a rambling answer doesn't cost you a turn.
 
 ## When things go wrong
 
@@ -156,4 +221,4 @@ A relay protects itself from whoever finds it. It holds at most 256 MB, with eac
 
 ## Costs
 
-Each player needs the stake, plus a small reserve in their session key that pays for a dispute if there is one. The reserve comes back at the end. The host also pays rent on the match account, which comes back too, apart from about 0.001 SOL left for good as a tombstone, so that address can never be reused. A match with no dispute takes 4 transactions on the match itself: create, join, close and retire. Each costs the network's base fee of 5,000 lamports per signature.
+Each player needs the stake, plus a small reserve in their session key that pays for a dispute if there is one, which comes to about 0.0104 SOL on devnet at the default stake. The reserve comes back at the end. The host also pays rent on the match account, which comes back too, apart from about 0.001 SOL left for good as a tombstone, so that address can never be reused. That makes about 0.033 SOL for the host, or about 0.044 with `--fund-guest`. A match with no dispute takes 4 transactions on the match itself: create, join, close and retire. Each costs the network's base fee of 5,000 lamports per signature.

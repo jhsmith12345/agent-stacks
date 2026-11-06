@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {Keypair} from '@solana/web3.js';
 import {channelAddress,channelTerms} from '../src/channel/chain.js';
-import {trustedDeployment} from '../src/channel/deployments.js';
+import {isTestNetwork,trustedDeployment} from '../src/channel/deployments.js';
 import {checkManifest,decodeInvite,encodeInvite,formatSol,newInvite,parseSol,seal,unseal,waitForManifest,waitForOffer} from '../src/channel/invite.js';
 import {RelayTransport,startRelay} from '../src/channel/relay.js';
 import {checkOffer,makeOffer,sessionHex} from '../src/channel/setup.js';
@@ -35,8 +35,18 @@ test('a code survives being sent, and gives the same match on both sides',()=>{
  assert.ok(code.length<1000);
  assert.deepEqual(decodeInvite(code),invite);
  assert.deepEqual(decodeInvite(`  ${code}\n`),invite,'stray whitespace from pasting is fine');
+ assert.deepEqual(decodeInvite(`${code}.`),invite,'and so is the full stop of the sentence it came in');
  assert.notEqual(newInvite(terms()).secret,invite.secret);
  assert.notEqual(newInvite(terms()).id,invite.id);
+});
+
+test('a code can say the host pays, and one that doesn’t stays as it was',()=>{
+ const funded=newInvite(terms({fund:true}));
+ assert.equal(decodeInvite(encodeInvite(funded)).fund,true);
+ const plain=newInvite(terms());
+ assert.equal('fund' in plain,false);
+ assert.equal('fund' in decodeInvite(encodeInvite(plain)),false);
+ assert.equal('fund' in newInvite(terms({fund:false})),false);
 });
 
 test('the relay’s name for an invite doesn’t give away its secret',()=>{
@@ -52,7 +62,7 @@ test('the relay’s name for an invite doesn’t give away its secret',()=>{
 test('a code that’s damaged or makes no sense is refused',()=>{
  const good=JSON.parse(Buffer.from(encodeInvite(newInvite(terms())).slice(8),'base64url').toString());
  for(const bad of ['','hello','stacks1.','stacks1.!!!','stacks1.e30',`stacks1.${'A'.repeat(3000)}`,encodeRaw(null),encodeRaw([]),encodeRaw('x')])assert.throws(()=>decodeInvite(bad),/invite/i,bad.slice(0,20));
- const cases={relay:['ftp://relay.example','not a url',null,7],program:['nope',null],genesis:['nope',null],host:['0OIl',null],secret:['short','zz'.repeat(32),null],buyIn:[0,-1,1.5,'5',2**60,null],bigBlind:[0,3,1.5,2_000_000,null],hands:[0,-1,1.5,null],seconds:[0,-1,1.5,10_000_000,null],think:[0,-1,1000,null,1.5]};
+ const cases={relay:['ftp://relay.example','not a url',null,7],program:['nope',null],genesis:['nope',null],host:['0OIl',null],secret:['short','zz'.repeat(32),null],buyIn:[0,-1,1.5,'5',2**60,null],bigBlind:[0,3,1.5,2_000_000,null],hands:[0,-1,1.5,null],seconds:[0,-1,1.5,10_000_000,null],think:[0,-1,1000,null,1.5],fund:[false,null,1,'yes']};
  for(const [field,values] of Object.entries(cases))for(const value of values)assert.throws(()=>decodeInvite(encodeRaw({...good,[field]:value})),/invite/i,`${field}=${value}`);
  assert.throws(()=>decodeInvite(encodeRaw({...good,seconds:30,think:20})),/thinking time/,'a decision has to fit the clock');
  assert.throws(()=>newInvite(terms({bigBlind:200_002})),/blinds/);
@@ -111,6 +121,11 @@ test('the guest only accepts the match it was promised',async()=>{
  for(const [name,manifest] of Object.entries(swaps))await assert.rejects(checkManifest(manifest,invite,me),undefined,name);
  for(const junk of [null,{},{protocol:'agent-stacks/channel/v1'}])await assert.rejects(checkManifest(junk,invite,me));
  await assert.rejects(checkManifest(good,invite,{...me,wallet:stranger}),/different players/,'it was made for someone else');
+});
+
+test('only devnet counts as a test network, so a host can only give away test funds',()=>{
+ assert.equal(isTestNetwork(GENESIS),true);
+ for(const other of ['5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d','4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY',undefined,null,'',PROGRAM])assert.equal(isTestNetwork(other),false,String(other));
 });
 
 test('an invite can’t choose the contract',()=>{

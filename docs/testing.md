@@ -25,6 +25,48 @@ A third run also showed that formatting a failed transaction's error crashed, be
 
 The upgrade itself took 16 seconds and about 0.92 test SOL, returned afterwards. The first attempt used `--use-rpc`, which the [note below](#first-public-devnet-run) already warned against, and failed after 305 seconds. By then the CLI had extended the program by 10,240 bytes, so about 0.052 test SOL stays with it. Giving `--buffer` an address alone doesn't resume a partial write, so that buffer was closed and a fresh one written from a keypair file. `scripts/channel.js deploy` refuses an existing program on purpose, so an upgrade is done with the Solana CLI directly.
 
+### A language model at the table, 2026-11-06
+
+`examples/llm-bot.js` asks a model for each decision. Through a normal invite, on public devnet and the public relay, Claude Opus 5.5 played the solver for 6 hands, using the `claude` command's login with every tool turned off.
+
+| | |
+| --- | --- |
+| Match | 6 hands in 497 seconds, 4 transactions and no dispute. The referee found no faults, and both players reported the same result. The model finished with 549,580 of its 1,000,000 |
+| Decisions | 20, all from the model, with none falling back to the safe default: 8 raises, 7 checks, 2 calls, 2 folds and 1 muck |
+| Thinking time | A mean of 3.5 seconds and a maximum of 12.3, against a limit of 60. That's about 70 of the 497 seconds. The rest went on shuffles and messages |
+| Cost | 0.00075 test SOL and about 4,300 output tokens. The command leaves most input tokens out of its count, so this isn't a full model cost |
+
+Its play looked reasonable. Every size read "total to reach" correctly, it semi-bluffed a draw and took the pot, and it mucked two pair after the solver showed a flush. It lost most of its chips to that flush and to a river bluff that got called. Six hands say nothing about how strong it is.
+
+Setting it up found more than the match did. An expired login, and then a command too old for the model, each meant the safe default on every decision, leaving only a line in the log. In a match, that folds to every bet. `--check` shows this before playing, but nothing makes a player run it yet.
+
+This doesn't cover the API route, which has only met a fake server, a model in both seats, or a slow model in a dispute. Against a stand-in server that sometimes fails, the `llm` scenario did play a whole match, with outages and unusable answers becoming the safe default.
+
+### A fresh agent with only the challenge message, 2026-11-06
+
+This tests whether someone's agent can get from a challenge message to a finished match on its own. Each run started a new Claude Code agent with no project files, settings or memory. Its only tool was a shell, as a new user with nothing set up in a clean Linux VM, so it couldn't reach the machine running it. It was given only the paragraph that `stacks host` prints for pasting. The host played on another machine with the solver, on public devnet and the public relay, with `--think 300` and `--fund-guest`, and the guest's wallet started empty.
+
+| | Claude Sonnet 5.5 | Claude Haiku 5.5 |
+| --- | --- | --- |
+| Match | 1 hand, ending all-in | All 3 hands |
+| Time from "go ahead" to the end | 100 seconds | 157 seconds |
+| Commands in the match | 9 | 15 |
+| Decisions missed | 0 | 0 |
+| Illegal moves | 0 | 0 |
+| Commands that hit the 120-second limit | 0 | 0 |
+| Model cost, as the command reports it | $0.15 | $0.02 |
+
+Both read the README and stopped to tell their owner what would run and what the risks were, as it asks, before installing anything. Both then ran `npm ci --omit=dev` and `join`, and played by following what each command printed. Neither opened anything but the README.
+
+The repository is still private, so these used a local copy that answers to the GitHub address for `git clone`. That's why Haiku's first try, fetching the README from the web, got a 404 and needed a hint from its "owner" to use `git clone`. It needs repeating once the repository is public.
+
+What it found:
+
+- **Sonnet copied the full stop after the code as part of the code.** It only worked because the decoder skips stray characters. The message now ends with the code, and a test holds the decoder to that.
+- **Haiku took a hand's `stacks` for that hand's result**, and told its owner the record looked inconsistent, though the numbers were right. The README now says they're running totals.
+
+This doesn't cover a real friend's machine or a different vendor's agent, a shell that kills background processes, or a host playing turn by turn on public devnet, which has only run locally. The solver is also quick, so neither run tested how long a match takes when both sides are thinking.
+
 ### Simulation: varied play with things going wrong, 2026-11-05
 
 The `soak` scenario in `scripts/channel-rehearsal.js` plays many matches at once with real agent processes, a real relay and a local validator. Stacks run from 10 to 500 big blinds. The bots are varied: `examples/solver-bot.js` in five styles and several sets of bet sizes, some with added noise, and a few that play at random.
@@ -134,7 +176,7 @@ The older path needed 57 minutes and about 2,900 transactions for 2 hands in its
 ### Automated checks
 
 - **Engine against contract:** 600 random betting games and 3,000 hand rankings match byte for byte, including illegal moves. A whole hand with real keys, shuffles and proofs matches at every step in the SBF VM.
-- **Tests:** 37 for the contract in the VM, also run against the channel-only build. 52 for the agent and its dispute decisions, 39 for connecting a decision program, 11 for the invite, 19 for the relay's limits and sealing, 12 for the referee, 9 for the solver, and 2 for the fairness of the deal.
+- **Tests:** 37 for the contract in the VM, also run against the channel-only build. 52 for the agent and its dispute decisions, 41 for connecting a decision program, 13 for the invite, 17 for playing turn by turn, 20 for the language-model program, 19 for the relay's limits and sealing, 12 for the referee, 9 for the solver, and 2 for the fairness of the deal.
 - **Fair deal:** across 52,000 shuffles every card is equally likely in every position, and across 30,000 deals dealt the way a match deals them neither seat wins more often and ties come up at about the real hold'em rate. Both run on every test pass, with limits six standard deviations out. This checks the shuffle and hand ranking, not the mental-poker encryption around them.
 - **Compute:** at most 97,988 units for a share move and 7,069 for a betting move.
 
@@ -147,6 +189,8 @@ Mutation checks break one rule at a time in a scratch copy and confirm a test fa
 | Dispute decisions | 16 of 16 | |
 | Relay limits and sealing | 39 of 39 | The first run caught 37: nothing checked that dropped messages left the memory total, or that nonces never repeat. Both have tests now |
 | Reading payouts from history, and the confirmation wait | 15 of 15 | The first run on payouts caught 4 of 7: its running total hid two faults, so the code got simpler and the test stricter |
+| Playing turn by turn, the check on decision programs, and funding the guest | 44 of 44 | The first run caught 40. Three were in restarts and in decisions with no time left, which have tests now. The other was the amount a host is told to hold: the rehearsal gave it a little extra, so now it funds exactly that figure |
+| The language-model program | 29 of 30 | Dropping the filter for text blocks: a thinking block has no text, so it changes nothing |
 | Decision programs and invites | 72 of 74 | An answer meant for an earlier question: the check that asks the question also stops it. Offering a raise after already acting: heads-up play can't reach that state, because the only raise that doesn't reopen the betting is an all-in, which leaves nobody to raise against |
 
 The first mutation runs caught only about half: 32 of 48 in the contract and 11 of 22 in the agent. Most misses were tests failing for the wrong reason. The rollback test, for example, used bad signatures, so it passed even with the window rule removed. Those tests were rewritten. The first run on decision programs and invites caught 62 of 72, and most of those misses got better tests too. The `stacks` command itself isn't under mutation: its checks are covered by the invite scenarios above. Nor are the referee, the solver or the agents' fallback yet.
@@ -190,7 +234,7 @@ Running on public devnet after the upgrade then found two more: an agent stallin
 
 ### What this doesn't show
 
-- No language model or person has used the interface or the invite. Every match used `examples/solver-bot.js` or the simple styles in `examples/decision-bot.js`.
+- No person has used the interface or the invite yet, and only three short matches have had a language model in them, each against the solver. Every other match used `examples/solver-bot.js`, the simple styles in `examples/decision-bot.js`, or a script standing in for an agent.
 - Linux and macOS only. The code assumes process groups and Unix file permissions, so Windows probably doesn't work.
 - The solver is a weak player, so it says little about what a strong one would do to the rules. Random play and noise cover some of that.
 - The relay has no matchmaking. It's been on the public internet for hours, not weeks, and its limits have only been tested locally, not under a real flood.

@@ -3,11 +3,11 @@
 // under the directory given.
 // Usage: AGENT_STACKS_ALLOW_LOCAL=1 node scripts/channel-rehearsal.js RPC PROGRAM_ID FUNDER_KEYPAIR WORK_DIRECTORY [SCENARIO...]
 // The invite scenarios check the deployed program against target/deploy-channel, or AGENT_STACKS_PROGRAM_SO.
-import {spawn} from 'node:child_process';
+import {execFileSync,spawn} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {createServer} from 'node:http';
 import {once} from 'node:events';
-import {appendFileSync,mkdirSync,readdirSync,readFileSync,writeFileSync} from 'node:fs';
+import {appendFileSync,existsSync,mkdirSync,readdirSync,readFileSync,writeFileSync} from 'node:fs';
 import {resolve,join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {setTimeout as pause} from 'node:timers/promises';
@@ -17,7 +17,7 @@ import {ChannelChain,withBytes,COMPLETE} from '../src/channel/chain.js';
 import {startRelay} from '../src/channel/relay.js';
 import {KIND_HAND,sha256,signedMessage} from '../src/channel/engine.js';
 import {toHex} from '../src/channel/wire.js';
-import {decodeInvite} from '../src/channel/invite.js';
+import {decodeInvite,parseSol} from '../src/channel/invite.js';
 import {coverage,referee} from '../src/channel/referee.js';
 import {seededRandom} from '../src/channel/solver.js';
 const [rpc,program,funderFile,workArg,...only]=process.argv.slice(2);
@@ -96,6 +96,7 @@ function stacks(dir,home,args,{extraEnv={}}={}){
  return p;
 }
 const lastJson=p=>JSON.parse(p.out.trim().split('\n').at(-1));
+// `fundEach` can give each player a different amount, and a player given nothing starts with an empty wallet.
 async function inviteSetup(name,{fundEach=1_000_000_000}={}){
  const dir=join(work,`${name}-${Date.now()}`);mkdirSync(dir,{recursive:true,mode:0o700});
  const code=readFileSync(ARTIFACT);
@@ -105,7 +106,8 @@ async function inviteSetup(name,{fundEach=1_000_000_000}={}){
   const p=stacks(dir,home,['wallet']);await p.done;
   assert(p.exit.code===0,`wallet: ${p.err.slice(-300)}`);
   const {address}=lastJson(p);wallets.push(address);
-  await fund(new PublicKey(address),fundEach);
+  const amount=Array.isArray(fundEach)?fundEach[wallets.length-1]:fundEach;
+  if(amount)await fund(new PublicKey(address),amount);
  }
  return {dir,wallets};
 }
@@ -113,6 +115,35 @@ async function hosted(dir,args){
  const host=stacks(dir,'home-a',['host',...args]);
  const code=await waitFor('the invite code',async()=>{const line=host.out.split('\n').find(l=>l.startsWith('stacks1.'));if(host.exit&&!line)throw Error(`host exited: ${host.err.slice(-400)}`);return line;},60_000);
  return {host,code};
+}
+// Stands in for the Messages API. It plays plausibly, and now and then fails the way a real service can.
+async function standInModel(seed){
+ const random=seededRandom(seed);
+ let served=0;
+ const answer=({messages,output_config})=>{
+  const question=JSON.parse(messages[0].content.split('Your decision:\n')[1]),roll=random();
+  if(output_config.format.schema.properties.show)return {show:question.winning||question.tied};
+  const {legal}=question;
+  if(question.hand===0)return {action:'call'};
+  if(roll<0.06)return {action:legal.check?'call':'check'};
+  if(roll<0.12)return 'I would like to think about this some more.';
+  if(legal.raise&&roll<0.55)return {action:'raise',to:legal.raise.min+Math.floor(random()*legal.raise.min)};
+  return legal.check?{action:'check'}:{action:'call'};
+ };
+ const server=createServer((request,response)=>{
+  let body='';
+  request.on('data',data=>{body+=data;});
+  request.on('end',()=>{
+   const parsed=JSON.parse(body);
+   // Each seat's first two questions are the check before a match, which a model having a bad moment would rightly fail.
+   if(++served>4&&random()<0.05){response.writeHead(500,{'content-type':'application/json'});response.end(JSON.stringify({type:'error',error:{type:'api_error',message:'a stand-in outage'}}));return;}
+   const reply=answer(parsed),text=typeof reply==='string'?reply:JSON.stringify(reply);
+   response.writeHead(200,{'content-type':'application/json'});
+   response.end(JSON.stringify({id:'msg_stand_in',type:'message',role:'assistant',model:parsed.model,stop_reason:'end_turn',stop_sequence:null,content:[{type:'text',text}],usage:{input_tokens:1,output_tokens:1}}));
+  });
+ });
+ await once(server.listen(0,'127.0.0.1'),'listening');
+ return {url:`http://127.0.0.1:${server.address().port}`,close:()=>{server.closeAllConnections();server.close();}};
 }
 const SCENARIOS={
  // The normal case. The contract should see only a create, a join and a close.
@@ -274,6 +305,42 @@ const SCENARIOS={
    return {hands:a.results.length,payouts:a.payouts,lostBesidesTheStake:spent,tombstone,matchTransactions:count};
   }finally{for(const p of [host,guest])if(p&&p.exit===null)p.child.kill('SIGKILL');relay.close();}
  },
+ // A language model in a real match, through the normal invite, against the solver. Only when named. Unless
+ // AGENT_STACKS_LLM_BOT names the program to run, a stand-in server answers, so this costs nothing and needs no login.
+ // AGENT_STACKS_LLM_BOTH puts it in both seats. AGENT_STACKS_LLM_HANDS, _THINK and _FUND set the rest.
+ async llm(){
+  const hands=process.env.AGENT_STACKS_LLM_HANDS??'3',think=process.env.AGENT_STACKS_LLM_THINK??'60';
+  const {dir,wallets}=await inviteSetup('llm',{fundEach:Number(process.env.AGENT_STACKS_LLM_FUND??1_000_000_000)});
+  const relay=process.env.AGENT_STACKS_LLM_RELAY?{url:process.env.AGENT_STACKS_LLM_RELAY,close:()=>{}}:await startRelay();
+  const fake=process.env.AGENT_STACKS_LLM_BOT?null:await standInModel(Number(process.env.SOAK_SEED??7));
+  if(fake)ENV.ANTHROPIC_API_KEY='stand-in';
+  const program=process.env.AGENT_STACKS_LLM_BOT??`${JSON.stringify(process.execPath)} examples/llm-bot.js --api anthropic --base-url ${fake.url}`;
+  const files=['host','guest'].map(seat=>join(dir,`decisions-${seat}.jsonl`));
+  const guestBot=process.env.AGENT_STACKS_LLM_BOTH?`${program} --log ${files[1]}`:`${JSON.stringify(process.execPath)} examples/solver-bot.js --seed 5 --style balanced`;
+  let host,guest;
+  try{
+   ({host}=await hosted(dir,['--relay',relay.url,'--buy-in','0.001','--big-blind','0.00002','--hands',hands,'--clock','900','--think',think,'--decide',`${program} --log ${files[0]}`]));
+   const code=host.out.split('\n').find(l=>l.startsWith('stacks1.'));
+   guest=stacks(dir,'home-b',['join',code,'--yes','--decide',guestBot]);
+   const started=Date.now();
+   const exits=await withTimeout(Promise.all([host.done,guest.done]),Number(process.env.AGENT_STACKS_LLM_SECONDS??900)*1000,'match with a model');
+   assert(exits.every(e=>e.code===0),`exited ${JSON.stringify(exits)}: ${host.err.slice(-400)} | ${guest.err.slice(-400)}`);
+   const [a,b]=[lastJson(host),lastJson(guest)];
+   assert(a.payouts?.[0]===b.payouts?.[0]&&a.payouts[0]+a.payouts[1]===2_000_000,`both report the same result, with nothing lost: ${a.payouts} and ${b.payouts}`);
+   const pairs=a.results.flatMap(r=>{const o=b.results.find(x=>x.hand===r.hand);return o?[[r,o]]:[];});
+   const list=await direct.connection.getSignaturesForAddress(new PublicKey(a.match),{limit:200},'confirmed');
+   const transactions=list.filter(s=>!s.err).length,disputed=transactions>4;
+   const judged=disputed?pairs.slice(0,-1):pairs,faults=referee(1_000_000,20_000,judged);
+   assert(!faults.length,`the referee disagrees: ${faults.join('; ')}`);
+   const decisions=files.filter(existsSync).flatMap(file=>readFileSync(file,'utf8').trim().split('\n').map(line=>JSON.parse(line)));
+   assert(decisions.length>0,'the model made decisions');
+   const answered=decisions.filter(d=>!d.failed),seen={};coverage(seen,judged,20_000);
+   const mix={};for(const d of answered){const name=d.reply.action??(d.reply.show?'show':'muck');mix[name]=(mix[name]??0)+1;}
+   const reasons={};for(const d of decisions)if(d.failed)reasons[d.failed.slice(0,60)]=(reasons[d.failed.slice(0,60)]??0)+1;
+   const seconds=answered.map(d=>d.ms/1000);
+   return {realModel:!fake,seconds:Math.round((Date.now()-started)/1000),hands:a.results.length,payouts:a.payouts,transactions,decisions:decisions.length,answered:answered.length,mix,failed:reasons,thinkingSeconds:seconds.length?{mean:Number((seconds.reduce((x,y)=>x+y,0)/seconds.length).toFixed(1)),max:Math.max(...seconds)}:null,tokens:{input:answered.reduce((n,d)=>n+(d.input??0),0),output:answered.reduce((n,d)=>n+(d.output??0),0)},play:seen,wallets,dir};
+  }finally{for(const p of [host,guest])if(p&&p.exit===null)p.child.kill('SIGKILL');relay.close();fake?.close();if(fake)delete ENV.ANTHROPIC_API_KEY;}
+ },
  // The guest's machine crashes mid-match. The same code picks it up again, and asks nothing twice.
  async inviteresume(){
   const {dir}=await inviteSetup('inviteresume');
@@ -310,7 +377,7 @@ const SCENARIOS={
   const relay=await startRelay();
   let host;
   try{
-   ({host}=await hosted(dir,['--relay',relay.url,'--buy-in','0.001','--think','10']));
+   ({host}=await hosted(dir,['--relay',relay.url,'--buy-in','0.001','--think','10','--check-call']));
    const code=host.out.split('\n').find(l=>l.startsWith('stacks1.'));
    const before=await lamports(wallets[1]);
    // This player's software trusts a different build at this address, as if the contract had been swapped.
@@ -330,6 +397,131 @@ const SCENARIOS={
    assert((relay.boxes.get(`${decodeInvite(code).id}/0`)?.items.length??0)===0,'and the host heard nothing');
    return {refused:true};
   }finally{if(host&&host.exit===null)host.child.kill('SIGKILL');relay.close();}
+ },
+ // A decision program that can't answer is found out before anyone has spent anything, on either side.
+ async notready(){
+  const {dir,wallets}=await inviteSetup('notready');
+  const relay=await startRelay(),before=await Promise.all(wallets.map(lamports));
+  const broken=`${JSON.stringify(process.execPath)} -e "console.error('no login');process.exit(1)"`;
+  let host,guest;
+  try{
+   const noHost=stacks(dir,'home-a',['host','--relay',relay.url,'--buy-in','0.001','--think','5','--decide',broken]);await noHost.done;
+   assert(noHost.exit.code!==0&&/isn’t ready/.test(noHost.err)&&/no login/.test(noHost.err),`the host was refused: ${noHost.err.slice(-300)}`);
+   assert(!noHost.out.includes('stacks1.'),'and got no code to send');
+   ({host}=await hosted(dir,['--relay',relay.url,'--buy-in','0.001','--big-blind','0.00002','--hands','1','--clock','600','--think','10','--decide',bot('call')]));
+   const code=host.out.split('\n').find(l=>l.startsWith('stacks1.'));
+   const noGuest=stacks(dir,'home-b',['join',code,'--yes','--decide',broken]);await noGuest.done;
+   assert(noGuest.exit.code!==0&&/isn’t ready/.test(noGuest.err)&&/no login/.test(noGuest.err),`the guest was refused: ${noGuest.err.slice(-300)}`);
+   assert((relay.boxes.get(`${decodeInvite(code).id}/0`)?.items.length??0)===0,'and the host heard nothing');
+   assert((await Promise.all(wallets.map(lamports))).every((balance,i)=>balance===before[i]),'not a lamport moved');
+   // The code still works, once the guest has it fixed.
+   guest=stacks(dir,'home-b',['join',code,'--yes','--decide',bot('call')]);
+   const exits=await withTimeout(Promise.all([host.done,guest.done]),240_000,'the match after the fix');
+   assert(exits.every(e=>e.code===0),`exited ${JSON.stringify(exits)}: ${host.err.slice(-300)} | ${guest.err.slice(-300)}`);
+   return {refusedBeforeSpending:2,payouts:lastJson(host).payouts};
+  }finally{for(const p of [host,guest])if(p&&p.exit===null)p.child.kill('SIGKILL');relay.close();}
+ },
+ // A guest with no funds yet, and a host who isn't paying. Nobody's deposit goes in until the guest can match it.
+ async guestpayslate(){
+  const {dir,wallets}=await inviteSetup('guestpayslate',{fundEach:[1_000_000_000,0]});
+  const relay=await startRelay();
+  let host,guest;
+  try{
+   ({host}=await hosted(dir,['--relay',relay.url,'--buy-in','0.001','--big-blind','0.00002','--hands','1','--clock','600','--think','10','--decide',bot('call')]));
+   const code=host.out.split('\n').find(l=>l.startsWith('stacks1.')),before=await lamports(wallets[0]);
+   guest=stacks(dir,'home-b',['join',code,'--yes','--decide',bot('call')]);
+   await waitFor('the host to see an empty wallet',async()=>/their wallet/.test(host.err)||null,60_000);
+   assert(/Send the difference/.test(guest.err),`the guest is told what to do: ${guest.err.slice(-300)}`);
+   assert(!/Sending/.test(host.err)&&await lamports(wallets[0])===before,'the host hasn’t paid for them, or put in a deposit');
+   assert(!/Creating the match/.test(host.err),'and hasn’t created the match');
+   await fund(new PublicKey(wallets[1]),20_000_000);
+   const exits=await withTimeout(Promise.all([host.done,guest.done]),240_000,'the match once funded');
+   assert(exits.every(e=>e.code===0),`exited ${JSON.stringify(exits)}: ${host.err.slice(-300)} | ${guest.err.slice(-300)}`);
+   return {payouts:lastJson(host).payouts};
+  }finally{for(const p of [host,guest])if(p&&p.exit===null)p.child.kill('SIGKILL');relay.close();}
+ },
+ // Two agents that can only run commands, as someone's coding agent would. The guest starts with an empty wallet, the
+ // host has exactly what it's told to have for both of them, and each is killed partway through and picks up again.
+ async turnbyturn(){
+  const buyIn=1_000_000;
+  const {dir,wallets}=await inviteSetup('turnbyturn',{fundEach:[0,0]});
+  const relay=await startRelay();
+  const shell=async(home,...args)=>{const p=stacks(dir,home,args);await p.done;return p;};
+  let id=null;
+  const running=home=>JSON.parse(readFileSync(join(dir,home,id,'turns/process.json'),'utf8')).pid;
+  const alive=pid=>{try{process.kill(pid,0);return true;}catch{return false;}};
+  const started=Date.now();
+  try{
+   const hostStart=await shell('home-a','host','--relay',relay.url,'--buy-in','0.001','--big-blind','0.00002','--hands','3','--clock','600','--think','60','--fund-guest');
+   assert(hostStart.exit.code===0,`host: ${hostStart.err.slice(-400)}`);
+   const code=hostStart.out.split('\n').find(l=>l.startsWith('stacks1.'));
+   id=decodeInvite(code).id;
+   // Exactly what it says it needs, with nothing to spare, so that figure has to be right.
+   const needs=/needs ([\d.]+) SOL for the match/.exec(hostStart.err);
+   assert(needs,`the host is told what it needs: ${hostStart.err.slice(0,400)}`);
+   await fund(new PublicKey(wallets[0]),parseSol(needs[1]));
+   assert(decodeInvite(code).fund===true,'the code says the host pays');
+   assert(/Send everything between the lines/.test(hostStart.err)&&hostStart.err.includes(`challenge code is ${code}\n`)&&/github\.com/.test(hostStart.err),'the host gets a message to send');
+   const guestStart=await shell('home-b','join',code,'--yes');
+   assert(guestStart.exit.code===0,`guest: ${guestStart.err.slice(-400)}`);
+   assert(JSON.parse(guestStart.out.trim().split('\n').at(-1)).next.includes('next'),'and says what to run');
+   assert(/host sends your wallet/.test(guestStart.err),'the guest is told who’s paying');
+   for(const home of ['home-a','home-b'])assert(!execFileSync('ps',['-o','args=','-p',String(running(home))],{encoding:'utf8'}).includes('stacks1.'),'the code’s secret stays out of the process list');
+   const raiser=t=>t.type==='show'?[t.winning||t.tied?'show':'muck']:t.legal.raise&&t.street==='flop'?['raise',String(t.legal.raise.min)]:t.legal.check?['check']:['call'];
+   const caller=t=>t.type==='show'?[t.winning||t.tied?'show':'muck']:t.legal.check?['check']:['call'];
+   const play=async(home,choose,killAt)=>{
+    const seen={decisions:0,commands:0,results:[],missed:[],refused:0,restarts:0};
+    let command=['next','--wait','3'];
+    for(;seen.commands<3000;seen.commands++){
+     const p=await shell(home,...command);
+     assert(p.exit.code===0,`${home} ${command.join(' ')}: ${p.err.slice(-300)}`);
+     const turn=lastJson(p);
+     for(const event of turn.since??[])(event.type==='missed'?seen.missed:seen.results).push(event);
+     command=['next','--wait','3'];
+     if(turn.type==='over')return {...seen,over:turn};
+     if(turn.type==='waiting')continue;
+     if(turn.type==='stopped'){
+      assert(turn.resume.includes('resume'),'it says how to carry on');
+      const again=await shell(home,'resume');
+      assert(again.exit.code===0,`resume: ${again.err.slice(-300)}`);
+      seen.restarts++;
+      continue;
+     }
+     assert(turn.type==='bet'||turn.type==='show',`an unknown turn: ${JSON.stringify(turn).slice(0,200)}`);
+     seen.decisions++;
+     if(seen.decisions===killAt){
+      const pid=running(home);process.kill(pid,'SIGKILL');
+      await waitFor('the match to die',async()=>!alive(pid)||null,10_000);
+      continue;
+     }
+     if(turn.type==='bet'&&!seen.refused){
+      const bad=await shell(home,'move',turn.id,'raise','1');
+      assert(bad.exit.code===1&&(/out of range/.test(bad.err)||/can’t bet or raise/.test(bad.err)),`a bad move is refused: ${bad.err.slice(-200)}`);
+      const stale=await shell(home,'move','0/0','call');
+      assert(stale.exit.code===1&&/has passed/.test(stale.err),`and so is one for another decision: ${stale.err.slice(-200)}`);
+      seen.refused++;
+     }
+     command=['move',turn.id,...choose(turn),'--wait','3'];
+    }
+    throw Error('Too many commands');
+   };
+   const [a,b]=await withTimeout(Promise.all([play('home-a',raiser,3),play('home-b',caller,4)]),420_000,'a match played by commands');
+   assert(a.over.finished+b.over.finished===2*buyIn,`nothing is created or lost: ${a.over.finished} and ${b.over.finished}`);
+   assert(a.over.hands===b.over.hands&&a.results.length===a.over.hands&&b.results.length===b.over.hands,`each hand is reported once: ${a.results.length}, ${b.results.length} of ${a.over.hands}`);
+   assert(a.results.at(-1).stacks.you===a.over.finished&&b.results.at(-1).stacks.you===b.over.finished,'and the last one matches the result');
+   assert(!a.missed.length&&!b.missed.length,`no decision went by: ${JSON.stringify([a.missed,b.missed]).slice(0,300)}`);
+   assert(a.restarts>=1&&b.restarts>=1,'both were killed and came back');
+   assert(a.results.flatMap(r=>r.history).some(h=>h.action==='raise'),'and real bets were made');
+   assert(await lamports(wallets[1])>=b.over.finished,'the guest, who started with nothing, holds what they won');
+   const list=await direct.connection.getSignaturesForAddress(new PublicKey(a.over.match),{limit:100},'confirmed');
+   const count=list.filter(s=>!s.err).length;
+   assert(count<=4,`it stayed off chain, saw ${count} transactions`);
+   await waitFor('the matches to end',async()=>(!alive(running('home-a'))&&!alive(running('home-b')))||null,30_000);
+   return {seconds:Math.round((Date.now()-started)/1000),hands:a.over.hands,finished:[a.over.finished,b.over.finished],decisions:[a.decisions,b.decisions],commands:[a.commands,b.commands],restarts:[a.restarts,b.restarts],transactions:count};
+  }finally{
+   if(id)for(const home of ['home-a','home-b']){try{process.kill(running(home),'SIGKILL');}catch{}}
+   relay.close();
+  }
  },
  // Many matches at varied stack depths, with bots that play differently, and with things going wrong. After
  // each one, every finished hand has to agree with a referee that shares no code with the engine or contract.
@@ -564,7 +756,7 @@ const SCENARIOS={
 };
 const summary={};
 for(const name of Object.keys(SCENARIOS)){
- if(only.length?!only.includes(name):name==='soak')continue;
+ if(only.length?!only.includes(name):name==='soak'||name==='llm')continue;
  log(`scenario ${name}`);
  try{summary[name]={ok:true,...await SCENARIOS[name]()};log(`${name}: passed`);}
  catch(error){summary[name]={ok:false,error:error.message};log(`${name}: FAILED: ${error.message}`);}

@@ -19,6 +19,7 @@ function checkInvite(i){
  for(const [name,max] of Object.entries(LIMITS))if(!whole(i[name],max))throw Error(`The invite’s ${name} isn’t valid`);
  if(i.bigBlind%2!==0||i.bigBlind<2||i.bigBlind>Math.floor(i.buyIn/10))throw Error('The invite’s blinds don’t fit its buy-in');
  if(!whole(i.think,MAX_THINK)||i.think*2>i.seconds)throw Error('The invite’s thinking time doesn’t fit its clock');
+ if(i.fund!==undefined&&i.fund!==true)throw Error('The invite’s funding isn’t valid');
  return i;
 }
 // Exact, because a stake shouldn't depend on floating point.
@@ -29,8 +30,10 @@ export function parseSol(text){
 }
 export const formatSol=lamports=>`${Math.floor(lamports/1e9)}.${String(lamports%1e9).padStart(9,'0').replace(/0+$/,'')}`.replace(/\.$/,'');
 const inviteId=secret=>new PublicKey(createHash('sha256').update('agent-stacks/invite/id/v1:').update(Buffer.from(secret,'hex')).digest()).toBase58();
-export function newInvite({relay,program,genesis,host,buyIn,bigBlind,hands,seconds,think}){
- return withId(checkInvite({relay,program,genesis,host,buyIn,bigBlind,hands,seconds,think,secret:randomBytes(32).toString('hex')}));
+// `fund` tells the guest the host will send its wallet what it needs. It's only a promise: nothing depends on it but
+// what the guest is told, and a guest who doesn't get the money simply can't join.
+export function newInvite({relay,program,genesis,host,buyIn,bigBlind,hands,seconds,think,fund=false}){
+ return withId(checkInvite({relay,program,genesis,host,buyIn,bigBlind,hands,seconds,think,...(fund?{fund:true}:{}),secret:randomBytes(32).toString('hex')}));
 }
 const withId=invite=>({...invite,id:inviteId(invite.secret)});
 export function encodeInvite(invite){

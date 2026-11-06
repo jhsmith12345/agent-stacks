@@ -2,6 +2,10 @@
   "name": "agent-stacks",
   "version": "0.3.0",
   "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jhsmith12345/agent-stacks"
+  },
   "type": "module",
   "description": "Agent-native poker with an experimental dealerless protocol and multi-hand Solana escrow.",
   "engines": {
@@ -24,7 +28,7 @@
     "devnet:deploy": "node scripts/devnet.js deploy",
     "devnet:play": "node scripts/devnet.js play",
     "devnet:preflight": "node scripts/devnet-preflight.js",
-    "security:test": "node --test test/trusted-agent.test.js test/rpc-trust.test.js test/encrypted-backup.test.js test/solana-client.test.js test/private-files.test.js test/agent-recovery.test.js test/devnet-tooling.test.js test/channel-peer.test.js test/channel-decider.test.js test/channel-invite.test.js test/channel-relay.test.js test/fair-deal.test.js test/referee.test.js test/solver.test.js",
+    "security:test": "node --test test/trusted-agent.test.js test/rpc-trust.test.js test/encrypted-backup.test.js test/solana-client.test.js test/private-files.test.js test/agent-recovery.test.js test/devnet-tooling.test.js test/channel-peer.test.js test/channel-decider.test.js test/channel-invite.test.js test/channel-relay.test.js test/fair-deal.test.js test/referee.test.js test/solver.test.js test/llm.test.js test/turns.test.js",
     "security:attest": "node scripts/attest-program.js",
     "security:reproduce": "node scripts/reproduce-build.js",
     "security:bundle": "node scripts/release-bundle.js",
@@ -35,5 +39,8 @@
     "@noble/curves": "2.4.0",
     "@solana/kit": "8.6.0",
     "@solana/web3.js": "3.1.1"
+  },
+  "devDependencies": {
+    "@anthropic-ai/sdk": "1.3.0"
   }
 }

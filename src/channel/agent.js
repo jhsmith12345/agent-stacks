@@ -11,11 +11,11 @@ import {ChannelRunner} from './runner.js';
 import {RelayTransport} from './relay.js';
 import {DecisionProgram} from './decider.js';
 import {acceptedManifest} from './manifest.js';
-// `decide` is a command that makes the poker decisions, within `think` seconds each. Without one, this agent
-// only checks and calls. It goes to the chain after `stallSeconds` of silence from the opponent, and that's
+// `decide` is a command that makes the poker decisions, within `think` seconds each, and `turns` is anything else
+// that can answer the same questions. Without either, this agent only checks and calls. It goes to the chain after `stallSeconds` of silence from the opponent, and that's
 // never less than three times the thinking time, since the opponent may be thinking. `makeTransport` replaces
 // the plain mailbox named after the match, for players who share a secret.
-export async function playMatch({sessionFile,directory:directoryArg,manifestFile,relay,rpcs,decide=null,think=20,stallSeconds=null,pollSeconds=null,allowLocal=false,makeTransport=null,log:write=text=>process.stderr.write(`${text}\n`)}){
+export async function playMatch({sessionFile,directory:directoryArg,manifestFile,relay,rpcs,decide=null,turns=null,think=20,stallSeconds=null,pollSeconds=null,allowLocal=false,makeTransport=null,log:write=text=>process.stderr.write(`${text}\n`)}){
  const directory=resolve(directoryArg);mkdirSync(directory,{recursive:true,mode:0o700});privateDirectory(directory);
  // A crash or power cut leaves a lock behind. The agent takes it over only once its holder is provably gone.
  const release=acquireLock(directory,'agent.lock',{reclaimDead:true});process.once('exit',release);
@@ -31,7 +31,7 @@ export async function playMatch({sessionFile,directory:directoryArg,manifestFile
  const store={save:state=>writePrivate(file,JSON.stringify(state))};
  const state=existsSync(file)?JSON.parse(readPrivate(file,'utf8')):null;
  const strategy=view=>view.owed>0?{action:2}:{action:1};
- const decider=decide?new DecisionProgram(decide,{limitMs:think*1000,log}):null;
+ const decider=turns??(decide?new DecisionProgram(decide,{limitMs:think*1000,log}):null);
  const closeDecider=()=>decider?.close();process.once('exit',closeDecider);
  if(!decider)log('No decision program, so this agent only checks and calls');
  const peer=new ChannelPeer(config,session,seat,{strategy,store,state,outside:!!decider});

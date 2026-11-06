@@ -8,7 +8,7 @@ import {join} from 'node:path';
 import {setTimeout as pause} from 'node:timers/promises';
 import {ChannelPeer,STAGE} from '../src/channel/peer.js';
 import {ChannelRunner} from '../src/channel/runner.js';
-import {DecisionProgram,describe,describeResult,parseReply} from '../src/channel/decider.js';
+import {checkDecisionProgram,DecisionProgram,describe,describeResult,parseReply} from '../src/channel/decider.js';
 import {act,BETTING,BOARD,encodeHand,legalMoves,newGame,resumeBoard,SHOWDOWN} from '../src/channel/engine.js';
 import {sessionFromSeed} from '../src/channel/keys.js';
 import {OPEN} from '../src/channel/chain.js';
@@ -510,4 +510,43 @@ test('the program is told how each hand ended, exactly once',{timeout:120000},as
  const r=runnerFor(pair[0],chainFor(open()),decider,{chainPollMs:1e9});
  for(let i=0;i<3;i++){await r.tick();await settle();}
  assert.equal(told.length,1);assert.equal(told[0].hand,1);
+});
+
+// A program's whole behaviour, as a command, given what it does with each question.
+const answering=body=>`${JSON.stringify(process.execPath)} -e ${JSON.stringify(`require('readline').createInterface({input:process.stdin}).on('line',line=>{const q=JSON.parse(line);${body}});`)}`;
+const reply=object=>`console.log(JSON.stringify({id:q.id,...${object}}));`;
+const sensible="q.type==='show'?{show:q.winning}:{action:'call'}";
+test('before any money moves, a program that can play is let through, and one that can’t is found out',async()=>{
+ await checkDecisionProgram(answering(reply(`(${sensible})`)),{limitMs:5000});
+ const refused={
+  'no such command':['/nonexistent/program',/not found|No such file/],
+  'exits straight away':[`${JSON.stringify(process.execPath)} -e "console.error('no key set');process.exit(3)"`,/no key set/],
+  'never answers':[`${JSON.stringify(process.execPath)} -e "setTimeout(()=>{},60000)"`,/no usable answer.*betting.*1 seconds/s],
+  'talks rubbish':[answering(`console.log('I think I would call');`),/no usable answer/],
+  'forgets the id':[answering(`console.log(JSON.stringify({action:'call'}));`),/no usable answer/],
+  'an unknown action':[answering(reply(`({action:'shove'})`)),/no usable answer/],
+  'a raise with no amount':[answering(reply(`({action:'raise'})`)),/no usable answer/],
+  'a free check when there’s a bet':[answering(reply(`({action:'check'})`)),/rules don’t allow/],
+  'a raise out of range':[answering(reply(`({action:'raise',to:1})`)),/rules don’t allow/],
+  'too big a raise':[answering(reply(`({action:'raise',to:q.legal.raise.max+1})`)),/rules don’t allow/],
+  'can’t answer a show question':[answering(`if(q.type==='show')process.exit(2);${reply(`({action:'call'})`)}`),/show-or-muck/],
+  'only falling back':[answering(reply(`({...(${sensible}),failed:true})`)),/only a fallback/],
+ };
+ for(const [name,[command,why]] of Object.entries(refused))await assert.rejects(checkDecisionProgram(command,{limitMs:1000}),error=>{assert.match(error.message,/nothing has started/,name);assert.match(error.message,why,name);return true;},name);
+});
+test('the practice questions read like real ones, and the program’s process doesn’t outlive them',async()=>{
+ const directory=mkdtempSync(join(tmpdir(),'practice-'));
+ try{
+  const seen=join(directory,'seen'),pid=join(directory,'pid');
+  await checkDecisionProgram(answering(`require('fs').appendFileSync(${JSON.stringify(seen)},line+'\\n');require('fs').writeFileSync(${JSON.stringify(pid)},String(process.pid));${reply(`(${sensible})`)}`),{limitMs:5000});
+  const [betting,showing]=readFileSync(seen,'utf8').trim().split('\n').map(line=>JSON.parse(line));
+  assert.equal(betting.type,'bet');assert.equal(betting.hand,0,'a hand no match ever has');assert.equal(betting.seconds,5);assert.equal(betting.street,'flop');
+  assert.equal(new Set([...betting.cards,...betting.board]).size,5,'cards a real deck could deal');
+  assert.ok(betting.legal.raise.min<=betting.legal.raise.max);
+  assert.equal(showing.type,'show');assert.equal(new Set([...showing.cards,...showing.opponentCards,...showing.board]).size,9);
+  assert.equal(showing.winning,true);
+  const alive=Number(readFileSync(pid,'utf8'));
+  for(let i=0;i<100;i++){try{process.kill(alive,0);await pause(20);}catch{break;}}
+  assert.throws(()=>process.kill(alive,0),/ESRCH/,'it’s started afresh for the match');
+ }finally{rmSync(directory,{recursive:true,force:true});}
 });

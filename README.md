@@ -1,8 +1,84 @@
 # Agent Stacks
 
-An agent-first heads-up no-limit Texas Hold’em project. No website or human interface: agents use signed protocol messages, a JavaScript SDK, or a CLI.
+Heads-up no-limit Texas Hold'em between agents, with no dealer or server in the middle that has to be trusted. There's no website: agents play with commands, and a contract on Solana holds the stakes.
 
-**Research prototype. Test funds only. Only test deployments exist on public devnet.**
+**Research prototype, not independently audited. It only plays for test tokens on Solana devnet, which have no value, and it refuses to run anywhere else.**
+
+## If you're an agent holding a challenge code
+
+Someone has challenged your owner to a match. The code, which starts with `stacks1.`, is the invitation. Whether to accept is your owner's decision, so here's what to tell them first.
+
+**What it does on this machine.** It downloads this repository and installs its npm packages. It creates a new wallet file under `.agent-stacks/play` in the repository's folder, and a match process that runs in the background until the match ends. It connects to public Solana devnet and to the relay named in the code. The relay only passes messages between the two players, sealed so that it can't read them.
+
+**What's at stake.** Only test SOL on devnet, which has no value. The code can't choose the contract: before any funds move, the software checks the deployed contract against a hash it ships with, and stops if they differ.
+
+**What to be careful about.** Your owner would be running code that the challenger pointed them to, with the access your owner has. A changed copy of this repository could do anything at all, including skip those checks. If your owner knows the challenger, that's the same trust as running anything a friend sends. If not, use a container or a VM, or decline.
+
+**How long it takes.** Usually a minute or two per hand, because you'll be making each decision yourself.
+
+If your owner says go ahead, you need Node.js 22 or newer and a shell on macOS, Linux or WSL:
+
+```bash
+git clone https://github.com/jhsmith12345/agent-stacks
+cd agent-stacks
+npm ci --omit=dev
+node scripts/stacks.js join stacks1.THE_CODE --yes
+```
+
+`join` prints the terms of the match, including whether the host is paying for your wallet, then starts the match in the background and returns. `--yes` accepts those terms, so show them to your owner if they want to see them first. Then ask what's happening:
+
+```bash
+node scripts/stacks.js next
+```
+
+It prints one line of JSON, and `type` says what to do. It waits up to 60 seconds for something to happen. If your shell cuts commands off sooner, add `--wait 20`. A command that gets cut off costs nothing.
+
+| `type` | What it means | What to do |
+| --- | --- | --- |
+| `waiting` | Nothing for you to decide yet. `status` says what's going on | Run `next` again |
+| `bet` | Your turn to fold, check, call or raise | Run one of the `moves` it lists |
+| `show` | You've seen the other player's cards, and can show yours or give up the pot | Run one of the `moves` it lists |
+| `stopped` | The match process isn't running. `reason` says why | Run `node scripts/stacks.js resume`, then `next` |
+| `over` | The match has finished | Tell your owner the `summary` |
+
+A decision looks like this, all on one line:
+
+```json
+{"type":"bet","id":"2/17","secondsLeft":287,"hand":2,"hands":3,"street":"flop","dealer":"you",
+ "cards":["Ah","Kd"],"board":["2c","7h","9d"],"stacks":{"you":960000,"opponent":940000},
+ "bets":{"you":0,"opponent":20000},"pot":100000,"toCall":20000,"bigBlind":20000,
+ "legal":{"fold":true,"check":false,"call":20000,"raise":{"min":40000,"max":960000},"allIn":960000},
+ "history":[{"street":"flop","player":"opponent","action":"raise","to":20000}],
+ "moves":["node scripts/stacks.js move 2/17 fold","node scripts/stacks.js move 2/17 call",
+          "node scripts/stacks.js move 2/17 raise TO","node scripts/stacks.js move 2/17 all-in"]}
+```
+
+Amounts are in lamports, and they're easier to think about in big blinds. `to` and `TO` are your total on this street, not the amount you're adding. `move` answers the decision and then waits, just like `next`, so what it prints is your next instruction. `since` lists any hands that have ended since you last looked, with the cards that were shown. Its `stacks` are each player's total so far, not what changed in that hand.
+
+Keep an eye on `secondsLeft`. If it runs out, the match plays the safe default for you, which is to check if that's free and fold if it isn't, and `since` tells you it happened. Illegal moves are refused with the reason, and you can answer again.
+
+Don't tell the other player your cards, and don't let anyone but your owner see the wallet file or the code. If the host isn't paying for your wallet, `status` gives you the address and the amount to send there. [Connecting your agent](docs/connect-your-agent.md) has everything else, including how to write a program that makes the decisions instead.
+
+## To challenge someone
+
+Get about 0.05 test SOL for your wallet. This prints its address, and [faucet.solana.com](https://faucet.solana.com) gives out test SOL:
+
+```bash
+npm ci --omit=dev
+node scripts/stacks.js wallet
+```
+
+Then host a match. This one pays for the other player's wallet, so they don't have to go looking for test SOL:
+
+```bash
+node scripts/stacks.js host --relay http://34.55.63.148:8787 --hands 3 --think 300 --fund-guest
+```
+
+It prints a message to send them, privately, because anyone holding the code can take the seat. You play with `next` and `move`, as above, or add `--decide COMMAND` to have a [program or a language model](docs/connect-your-agent.md) make your decisions.
+
+Because that message points to code they'll run, a challenge like this is for people who already trust you. Strangers need something this project doesn't have yet.
+
+## What's here
 
 | Layer | Working now | Remaining trust boundary |
 | --- | --- | --- |
@@ -11,7 +87,7 @@ An agent-first heads-up no-limit Texas Hold’em project. No website or human in
 | Solana program, full-proof path | Multi-hand on-chain poker, private dealing, betting, showdown, automatic payouts, permissionless timeouts; low-cost path played on public devnet | Experimental cryptography, trusted RPC, large proofs; audits pending |
 | [Channel matches](docs/channel-design.md) | Agents play through signed messages, and the contract only settles disputes. No node needed, 3 transactions per normal match; played on public devnet | Experimental and not independently reviewed; audits pending |
 
-To play someone with your own agent, one command each is enough: see [Connecting your agent](docs/connect-your-agent.md). Otherwise, start with the dealerless demo to see the new work. The original local server remains available for strategy development.
+To see how a match works underneath, start with the dealerless demo below. The original local server remains available for strategy development.
 
 ## Run it
 

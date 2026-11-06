@@ -20,6 +20,8 @@ export function describeResult(r){
  const me=r.seat;
  return {type:'result',hand:r.hand,winner:r.winner===2?'split':whose(r.winner,me),reason:REASONS[r.reason],stacks:both(r.stacks,me),cards:r.cards?names(r.cards):null,opponentCards:names(r.opponentCards),board:names(r.board),history:history(r.betting,me)};
 }
+// What applies when a program doesn't answer. A broken agent shouldn't put in more money, and a winner is still worth showing.
+export const safeDefault=question=>question.type==='show'?{show:question.winning||question.tied}:question.legal.check?{action:'check'}:{action:'fold'};
 // What the peer is handed. Null means no usable reply, and the legality of a move is the engine's to judge.
 export function parseReply(type,reply){
  if(!reply||typeof reply!=='object')return null;
@@ -69,7 +71,7 @@ export class DecisionProgram{
   try{reply=JSON.parse(line);}catch{this.log('decision program: ignored a line that isn’t JSON');return;}
   const waiting=this.pending.get(reply?.id);
   if(!waiting)return;
-  this.failures=0;
+  this.failures=0;this.lastRaw=reply;
   const parsed=parseReply(waiting.type,reply);
   if(parsed===null)this.log(`decision program: couldn’t use the reply to question ${reply.id}, so the safe default applies`);
   waiting.finish(parsed);
@@ -107,4 +109,25 @@ export class DecisionProgram{
   try{child.stdin.end();}catch{}
   try{process.kill(-child.pid,'SIGKILL');}catch{}
  }
+}
+// Two made-up decisions, asked before any money moves. Hand 0 never happens in a match.
+const PRACTICE=[
+ {type:'bet',view:{seat:0,hand:0,hands:10,street:1,button:0,cards:[48,47],board:[0,27,34],stacks:[960_000,940_000],bets:[0,20_000],pot:100_000,owed:20_000,bigBlind:20_000,legal:{fold:true,check:false,call:20_000,raise:{min:40_000,max:960_000},allIn:960_000},history:[]}},
+ {type:'show',view:{seat:0,hand:0,hands:10,cards:[48,47],opponentCards:[42,41],board:[0,27,34,35,5],winning:true,tied:false,pot:300_000}},
+];
+const allowed=({view:{legal}},{action,amount})=>[legal.fold,legal.check,legal.call,legal.raise&&amount>=legal.raise.min&&amount<=legal.raise.max,legal.allIn][action];
+// Without this, a program that can't answer costs its owner the match without a word, because the safe default
+// folds to every bet and the match carries on. So it's found out here, while it costs nothing. The program is then
+// stopped, and the match starts it afresh.
+export async function checkDecisionProgram(command,{limitMs=20_000,env=process.env}={}){
+ const said=[],program=new DecisionProgram(command,{limitMs,env,log:text=>said.push(text)});
+ const refuse=why=>{throw Error(`This decision program isn’t ready, so nothing has started and no money has moved. ${why}${said.length?`\nWhat it said:\n${said.slice(-5).join('\n')}`:''}`);};
+ try{
+  for(const question of PRACTICE){
+   const reply=await program.ask(question),asked=question.type==='show'?'show-or-muck':'betting';
+   if(reply===null)refuse(`It gave no usable answer to a practice ${asked} question within ${Math.round(limitMs/1000)} seconds. See docs/connect-your-agent.md for what it should say.`);
+   if(program.lastRaw?.failed===true)refuse(`It answered a practice ${asked} question, but says that answer is only a fallback, because it couldn’t really decide.`);
+   if(question.type==='bet'&&!allowed(question,reply))refuse('It answered a practice betting question with a move the rules don’t allow.');
+  }
+ }finally{program.close();}
 }

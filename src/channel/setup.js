@@ -27,6 +27,15 @@ export async function fundsNeeded(client,{buyIn,reserve,creating}){
  const keep=Number(await client.connection.getMinimumBalanceForRentExemption(0));
  return buyIn+reserve+keep+100_000+(creating?Number(await client.connection.getMinimumBalanceForRentExemption(CHANNEL_SPACE)):0);
 }
+// One wallet can host several matches at once, and another of them can spend what was here between the check and the
+// transaction. That only means waiting for more, so false says to go round again. Anything else is a real failure.
+export async function tryToSpend(client,wallet,needed,send){
+ try{await send();return true;}
+ catch(error){
+  if(Number(await client.connection.getBalance(wallet.publicKey,'confirmed'))>=needed)throw error;
+  return false;
+ }
+}
 export async function buildManifest({client,wallet,sessionWallet,offer,program,buyIn,bigBlind,hands,seconds}){
  const genesis=await client.checkNetwork(),nonce=randomBytes(32),[match]=await channelAddress(program,wallet.publicKey,nonce);
  const manifest={protocol:'agent-stacks/channel/v1',genesis,program,players:[wallet.publicKey.toBase58(),offer.wallet],sessions:[sessionHex(sessionWallet),offer.session],match:match.toBase58(),nonce:nonce.toString('hex'),buyIn,bigBlind,maxHands:hands,turnSeconds:seconds};

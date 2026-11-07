@@ -523,6 +523,26 @@ const SCENARIOS={
    relay.close();
   }
  },
+ // One wallet hosting three matches at once, with only enough for two. The third waits its turn rather than failing.
+ async sharedwallet(){
+  const {dir,wallets}=await inviteSetup('sharedwallet',{fundEach:[0,0]});
+  const relay=await startRelay(),hosts=[],guests=[];
+  const options=seed=>['--relay',relay.url,'--buy-in','0.001','--big-blind','0.00002','--hands','1','--clock','600','--think','10','--fund-guest','--decide',bot(seed)];
+  try{
+   for(let i=0;i<3;i++)hosts.push((await hosted(dir,options('call'))).host);
+   const needs=/needs ([\d.]+) SOL for the match/.exec(hosts[0].err);
+   assert(needs,`the host is told what it needs: ${hosts[0].err.slice(0,300)}`);
+   await fund(new PublicKey(wallets[0]),2*parseSol(needs[1]));
+   ['home-b','home-c','home-d'].forEach((home,i)=>guests.push(stacks(dir,home,['join',hosts[i].out.split('\n').find(l=>l.startsWith('stacks1.')),'--yes','--decide',bot('call')])));
+   const everyone=[...hosts,...guests];
+   const exits=await withTimeout(Promise.all(everyone.map(p=>p.done)),300_000,'three matches from one wallet');
+   assert(exits.every(e=>e.code===0),`exited ${JSON.stringify(exits)}: ${everyone.map(p=>p.err.slice(-200)).join(' | ')}`);
+   for(const p of hosts)assert(lastJson(p).payouts[0]+lastJson(p).payouts[1]===2_000_000,'each match paid out what went in');
+   const waited=hosts.filter(p=>/Send the difference/.test(p.err)).length;
+   assert(waited>=1,'at least one had to wait for funds, or this tested nothing');
+   return {matches:3,waitedForFunds:waited,payouts:hosts.map(p=>lastJson(p).payouts)};
+  }finally{for(const p of [...hosts,...guests])if(p.exit===null)p.child.kill('SIGKILL');relay.close();}
+ },
  // Many matches at varied stack depths, with bots that play differently, and with things going wrong. After
  // each one, every finished hand has to agree with a referee that shares no code with the engine or contract.
  // SOAK_MATCHES and SOAK_WORKERS set the size, and SOAK_SEED makes a run repeatable.

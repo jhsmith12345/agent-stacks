@@ -58,14 +58,20 @@ This tests whether someone's agent can get from a challenge message to a finishe
 
 Both read the README and stopped to tell their owner what would run and what the risks were, as it asks, before installing anything. Both then ran `npm ci --omit=dev` and `join`, and played by following what each command printed. Neither opened anything but the README.
 
-The repository is still private, so these used a local copy that answers to the GitHub address for `git clone`. That's why Haiku's first try, fetching the README from the web, got a 404 and needed a hint from its "owner" to use `git clone`. It needs repeating once the repository is public.
+The repository was still private for these, so they used a local copy that answers to the GitHub address for `git clone`. That's why Haiku's first try, fetching the README from the web, got a 404 and needed a hint from its "owner" to use `git clone`.
+
+Once it was public, a third run used nothing but the real address. A fresh Sonnet 5.5 agent, in the same clean VM, read the README from GitHub and cloned the repository. The host ran the same command the README gives, with `examples/llm-bot.js` and Claude Opus 5.5 making its decisions, so a model was thinking on each side. All 3 hands took about 2 minutes from `join` to the end, with no decisions missed and no illegal moves, and the host's model answered all 9 of its decisions in a mean of 2.1 seconds. The agent's first `git clone` hit a network error, and it retried by itself. It ran `join` without `--yes` first, which prints the terms and stops, then checked them before accepting.
 
 What it found:
 
 - **Sonnet copied the full stop after the code as part of the code.** It only worked because the decoder skips stray characters. The message now ends with the code, and a test holds the decoder to that.
 - **Haiku took a hand's `stacks` for that hand's result**, and told its owner the record looked inconsistent, though the numbers were right. The README now says they're running totals.
 
-This doesn't cover a real friend's machine or a different vendor's agent, a shell that kills background processes, or a host playing turn by turn on public devnet, which has only run locally. The solver is also quick, so neither run tested how long a match takes when both sides are thinking.
+This doesn't cover a real friend's machine or a different vendor's agent, a shell that kills background processes, or a host playing turn by turn on public devnet, which has only run locally. Both models here answer quickly, so a slower agent would take longer.
+
+### One wallet hosting several matches, 2026-11-06
+
+Three matches at once from one wallet, on a local validator. The first try, with too little in the wallet, left the third match dead with `Custom: 1` and its guest waiting for good. Two matches had passed the funds check and then spent the money before the third's transaction landed. A match that comes up short now waits for funds and says so. The `sharedwallet` scenario funds exactly two matches, and all three finish, with the third starting once the others pay back. This hasn't been run on public devnet.
 
 ### Simulation: varied play with things going wrong, 2026-11-05
 
@@ -176,7 +182,7 @@ The older path needed 57 minutes and about 2,900 transactions for 2 hands in its
 ### Automated checks
 
 - **Engine against contract:** 600 random betting games and 3,000 hand rankings match byte for byte, including illegal moves. A whole hand with real keys, shuffles and proofs matches at every step in the SBF VM.
-- **Tests:** 37 for the contract in the VM, also run against the channel-only build. 52 for the agent and its dispute decisions, 41 for connecting a decision program, 13 for the invite, 17 for playing turn by turn, 20 for the language-model program, 19 for the relay's limits and sealing, 12 for the referee, 9 for the solver, and 2 for the fairness of the deal.
+- **Tests:** 37 for the contract in the VM, also run against the channel-only build. 52 for the agent and its dispute decisions, 41 for connecting a decision program, 14 for the invite, 17 for playing turn by turn, 20 for the language-model program, 19 for the relay's limits and sealing, 12 for the referee, 9 for the solver, and 2 for the fairness of the deal.
 - **Fair deal:** across 52,000 shuffles every card is equally likely in every position, and across 30,000 deals dealt the way a match deals them neither seat wins more often and ties come up at about the real hold'em rate. Both run on every test pass, with limits six standard deviations out. This checks the shuffle and hand ranking, not the mental-poker encryption around them.
 - **Compute:** at most 97,988 units for a share move and 7,069 for a betting move.
 
@@ -189,7 +195,7 @@ Mutation checks break one rule at a time in a scratch copy and confirm a test fa
 | Dispute decisions | 16 of 16 | |
 | Relay limits and sealing | 39 of 39 | The first run caught 37: nothing checked that dropped messages left the memory total, or that nonces never repeat. Both have tests now |
 | Reading payouts from history, and the confirmation wait | 15 of 15 | The first run on payouts caught 4 of 7: its running total hid two faults, so the code got simpler and the test stricter |
-| Playing turn by turn, the check on decision programs, and funding the guest | 44 of 44 | The first run caught 40. Three were in restarts and in decisions with no time left, which have tests now. The other was the amount a host is told to hold: the rehearsal gave it a little extra, so now it funds exactly that figure |
+| Playing turn by turn, the check on decision programs, and funding the guest | 48 of 48 | The first runs missed six. Three were in restarts and in decisions with no time left, which have tests now. One was the amount a host is told to hold: the rehearsal gave it a little extra, so now it funds exactly that figure. Two were a shared wallet running short between its check and its transaction, which a rehearsal can't reach reliably, so that logic moved somewhere a test can |
 | The language-model program | 29 of 30 | Dropping the filter for text blocks: a thinking block has no text, so it changes nothing |
 | Decision programs and invites | 72 of 74 | An answer meant for an earlier question: the check that asks the question also stops it. Offering a raise after already acting: heads-up play can't reach that state, because the only raise that doesn't reopen the betting is an all-in, which leaves nobody to raise against |
 
@@ -234,7 +240,7 @@ Running on public devnet after the upgrade then found two more: an agent stallin
 
 ### What this doesn't show
 
-- No person has used the interface or the invite yet, and only three short matches have had a language model in them, each against the solver. Every other match used `examples/solver-bot.js`, the simple styles in `examples/decision-bot.js`, or a script standing in for an agent.
+- No person has used the interface or the invite yet, and only four short matches have had a language model in them. Every other match used `examples/solver-bot.js`, the simple styles in `examples/decision-bot.js`, or a script standing in for an agent.
 - Linux and macOS only. The code assumes process groups and Unix file permissions, so Windows probably doesn't work.
 - The solver is a weak player, so it says little about what a strong one would do to the rules. Random play and noise cover some of that.
 - The relay has no matchmaking. It's been on the public internet for hours, not weeks, and its limits have only been tested locally, not under a real flood.

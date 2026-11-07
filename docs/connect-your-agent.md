@@ -30,6 +30,8 @@ node scripts/stacks.js join stacks1.abc... --decide "node my-agent.js"
 
 They see the terms and are asked to confirm, or they can accept them up front with `--yes`. Then both sides make their deposits, play, get paid, and get back whatever wasn't part of the result.
 
+To play several people, run `host` once for each, because a code only works once. They can overlap and share a wallet, which needs funds for each match running at once. A match that comes up short waits until another finishes and returns its funds. When playing turn by turn, give each match its own `--home`, because `next` and `move` follow the latest match in a folder.
+
 Each player's wallet is created under `.agent-stacks/play` on first use. Pass `--wallet FILE` to use your own, and `--home DIRECTORY` to keep everything somewhere else.
 
 `--fund-guest` has the host send the other player's wallet what it needs when they connect, so they don't have to find test SOL. It only works on devnet, and what's sent stays with them. Without it, the guest's software says how much to send and where, and the host waits, with no deposit made, until the guest's wallet can match it.

@@ -6,7 +6,7 @@ import {channelAddress,channelTerms} from '../src/channel/chain.js';
 import {isTestNetwork,trustedDeployment} from '../src/channel/deployments.js';
 import {checkManifest,decodeInvite,encodeInvite,formatSol,newInvite,parseSol,seal,unseal,waitForManifest,waitForOffer} from '../src/channel/invite.js';
 import {RelayTransport,startRelay} from '../src/channel/relay.js';
-import {checkOffer,makeOffer,sessionHex} from '../src/channel/setup.js';
+import {checkOffer,makeOffer,sessionHex,tryToSpend} from '../src/channel/setup.js';
 const key=async()=>Keypair.generate();
 const PROGRAM='DrUx4PvwUpW1mHPqhDM7Stabtx6JSyXycvtaZftGP1g4',GENESIS='EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG';
 const terms=(overrides={})=>({relay:'https://relay.example',program:PROGRAM,genesis:GENESIS,host:'11111111111111111111111111111112',buyIn:1_000_000,bigBlind:20_000,hands:10,seconds:600,think:20,...overrides});
@@ -126,6 +126,16 @@ test('the guest only accepts the match it was promised',async()=>{
 test('only devnet counts as a test network, so a host can only give away test funds',()=>{
  assert.equal(isTestNetwork(GENESIS),true);
  for(const other of ['5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d','4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY',undefined,null,'',PROGRAM])assert.equal(isTestNetwork(other),false,String(other));
+});
+
+test('a wallet another match has just spent from only means waiting, and any other failure still counts',async()=>{
+ const holding=balance=>({connection:{getBalance:async()=>balance}}),wallet={publicKey:'anything'},refused=async()=>{throw Error('refused');};
+ let sent=0;
+ assert.equal(await tryToSpend(holding(0),wallet,100,async()=>{sent++;}),true,'it went through, whatever the balance says now');
+ assert.equal(sent,1);
+ assert.equal(await tryToSpend(holding(99),wallet,100,refused),false,'too little is left, so go round again');
+ await assert.rejects(tryToSpend(holding(100),wallet,100,refused),/refused/,'there’s enough, so something else is wrong');
+ await assert.rejects(tryToSpend(holding(1000),wallet,100,refused),/refused/);
 });
 
 test('an invite can’t choose the contract',()=>{

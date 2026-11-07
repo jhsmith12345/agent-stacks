@@ -24,7 +24,7 @@ import {RelayTransport,SealedTransport} from '../src/channel/relay.js';
 import {playMatch} from '../src/channel/agent.js';
 import {checkDecisionProgram} from '../src/channel/decider.js';
 import {isTestNetwork,trustedDeployment} from '../src/channel/deployments.js';
-import {buildManifest,fundsNeeded,makeOffer,reserveNeeded,sendClaim,sendCreate,sendJoin,sendRetire,sendSweep,sessionHex} from '../src/channel/setup.js';
+import {buildManifest,fundsNeeded,makeOffer,reserveNeeded,sendClaim,sendCreate,sendJoin,sendRetire,sendSweep,sessionHex,tryToSpend} from '../src/channel/setup.js';
 import {checkManifest,decodeInvite,encodeInvite,formatSol,matchKey,matchMailbox,newInvite,parseSol,seal,waitForManifest,waitForOffer} from '../src/channel/invite.js';
 import {finishTurns,matchRunning,moveTaken,nextTurn,recordProcess,submitMove,TurnDecider} from '../src/channel/turns.js';
 const option=(name,fallback=null)=>{const i=process.argv.indexOf(name);return i>0?process.argv[i+1]:fallback;};
@@ -132,11 +132,13 @@ const TRANSFER_FEE=5000;
 async function fundGuest({client,needed,guestNeeded},invite,offer){
  if(!allowLocal&&!isTestNetwork(invite.genesis))throw Error('Refusing to send the other player funds on a network that isn’t a test network');
  const guest=new PublicKey(offer.wallet);
- const short=guestNeeded-Number(await client.connection.getBalance(guest,'confirmed'));
- if(short<=0)return;
- await waitForFunds(client,needed+short+TRANSFER_FEE);
- say(`Sending ${formatSol(short)} test SOL to the other player’s wallet.`);
- await client.send([SystemProgram.transfer({fromPubkey:wallet.publicKey,toPubkey:guest,lamports:BigInt(short)})]);
+ for(;;){
+  const short=guestNeeded-Number(await client.connection.getBalance(guest,'confirmed'));
+  if(short<=0)return;
+  await waitForFunds(client,needed+short+TRANSFER_FEE);
+  say(`Sending ${formatSol(short)} test SOL to the other player’s wallet.`);
+  if(await tryToSpend(client,wallet,needed+short+TRANSFER_FEE,()=>client.send([SystemProgram.transfer({fromPubkey:wallet.publicKey,toPubkey:guest,lamports:BigInt(short)})])))return;
+ }
 }
 // Nobody's deposit should sit waiting on a player who can't pay.
 async function waitForGuestFunds({client,guestNeeded},offer){
@@ -168,10 +170,10 @@ async function asHost(invite){
   manifest=await buildManifest({client,wallet,sessionWallet,offer,program:invite.program,buyIn:invite.buyIn,bigBlind:invite.bigBlind,hands:invite.hands,seconds:invite.seconds});
   writePrivate(manifestFile,JSON.stringify(manifest));
  }
- if(!await read(client,manifest)){
+ while(!await read(client,manifest)){
   await waitForFunds(client,context.needed);
   say('Creating the match.');
-  await sendCreate({client,wallet,sessionWallet,manifest,reserve});
+  if(await tryToSpend(client,wallet,context.needed,()=>sendCreate({client,wallet,sessionWallet,manifest,reserve})))break;
  }
  // Until they've joined, in case the relay lost it. A relay can't change it without the invite's secret.
  const repeat=async stopped=>{

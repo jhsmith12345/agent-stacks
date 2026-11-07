@@ -96,6 +96,26 @@ function stacks(dir,home,args,{extraEnv={}}={}){
  return p;
 }
 const lastJson=p=>JSON.parse(p.out.trim().split('\n').at(-1));
+// Plays one seat by running commands, as an agent would. A decision can take its time, or a machine can sleep through it.
+async function byCommands(shell,home,{atDecision=async()=>true,afterMove=async()=>false}={}){
+ const choose=t=>t.type==='show'?[t.winning||t.tied?'show':'muck']:t.legal.check?['check']:['call'];
+ const seen={decisions:0,results:[],missed:[]};
+ let command=['next','--wait','3'];
+ for(let i=0;i<2000;i++){
+  const moved=command[0]==='move',p=await shell(home,...command);
+  assert(p.exit.code===0,`${home} ${command.join(' ')}: ${p.err.slice(-300)}`);
+  const turn=lastJson(p);
+  for(const event of turn.since??[])(event.type==='missed'?seen.missed:seen.results).push(event);
+  command=['next','--wait','3'];
+  if(turn.type==='over')return {...seen,over:turn};
+  if(moved&&await afterMove(seen))continue;
+  if(turn.type==='waiting')continue;
+  assert(turn.type==='bet'||turn.type==='show',`${home}: ${JSON.stringify(turn).slice(0,300)}`);
+  seen.decisions++;
+  if(await atDecision(turn,seen))command=['move',turn.id,...choose(turn),'--wait','0'];
+ }
+ throw Error('Too many commands');
+}
 // `fundEach` can give each player a different amount, and a player given nothing starts with an empty wallet.
 async function inviteSetup(name,{fundEach=1_000_000_000}={}){
  const dir=join(work,`${name}-${Date.now()}`);mkdirSync(dir,{recursive:true,mode:0o700});
@@ -520,6 +540,88 @@ const SCENARIOS={
    return {seconds:Math.round((Date.now()-started)/1000),hands:a.over.hands,finished:[a.over.finished,b.over.finished],decisions:[a.decisions,b.decisions],commands:[a.commands,b.commands],restarts:[a.restarts,b.restarts],transactions:count};
   }finally{
    if(id)for(const home of ['home-a','home-b']){try{process.kill(running(home),'SIGKILL');}catch{}}
+   relay.close();
+  }
+ },
+ // A match for agents that check in every few minutes, from the host's flag to the instructions both players get.
+ async slowmatch(){
+  const buyIn=1_000_000;
+  const {dir,wallets}=await inviteSetup('slowmatch',{fundEach:[0,0]});
+  const relay=await startRelay();
+  const shell=async(home,...args)=>{const p=stacks(dir,home,args);await p.done;return p;};
+  let id=null;
+  const started=Date.now();
+  try{
+   const hostStart=await shell('home-a','host','--relay',relay.url,'--buy-in','0.001','--big-blind','0.00002','--hands','1','--slow','--fund-guest');
+   assert(hostStart.exit.code===0,`host: ${hostStart.err.slice(-400)}`);
+   const code=hostStart.out.split('\n').find(l=>l.startsWith('stacks1.')),invite=decodeInvite(code);
+   id=invite.id;
+   assert(invite.think===900&&invite.seconds===14_400,`15 minutes a decision and a 4-hour clock, saw ${invite.think} and ${invite.seconds}`);
+   assert(hostStart.err.includes(`It's a slow match with 15 minutes per decision, so keep checking for your turn at least every 5 minutes until it's over. The challenge code is ${code}\n`),`the message tells their agent, with the code still last: ${hostStart.err.slice(0,900)}`);
+   assert(hostStart.err.includes('your computer has to stay awake until it\'s over'),'and tells the person');
+   assert(lastJson(hostStart).next.includes('next --wait 300')&&/This is a slow match, with 15 minutes/.test(hostStart.err),'the host’s agent is told the same');
+   await fund(new PublicKey(wallets[0]),parseSol(/needs ([\d.]+) SOL for the match/.exec(hostStart.err)[1]));
+   const guestStart=await shell('home-b','join',code,'--yes');
+   assert(guestStart.exit.code===0,`guest: ${guestStart.err.slice(-400)}`);
+   assert(lastJson(guestStart).next.includes('next --wait 300')&&/This is a slow match, with 15 minutes/.test(guestStart.err),'and so is the guest’s');
+   const [a,b]=await withTimeout(Promise.all([byCommands(shell,'home-a'),byCommands(shell,'home-b')]),300_000,'a slow match');
+   assert(a.over.finished+b.over.finished===2*buyIn,`nothing is created or lost: ${a.over.finished} and ${b.over.finished}`);
+   assert(!a.missed.length&&!b.missed.length,'no decision went by');
+   return {seconds:Math.round((Date.now()-started)/1000),hands:a.over.hands,finished:[a.over.finished,b.over.finished],decisions:[a.decisions,b.decisions]};
+  }finally{
+   if(id)for(const home of ['home-a','home-b']){try{process.kill(JSON.parse(readFileSync(join(dir,home,id,'turns/process.json'),'utf8')).pid,'SIGKILL');}catch{}}
+   relay.close();
+  }
+ },
+ // A laptop shut during a match, at a small scale: 20 seconds per decision, so the other player goes to the chain after
+ // 60 seconds of silence. Shut on its own turn for longer than a decision allows, the decision goes by and the match
+ // carries on. Shut for longer than the silence allows, the hand goes to the chain, and the sleeper answers there when it
+ // wakes. It also measures what players waiting on each other send through the relay, which is most of what a slow match does.
+ async asleep(){
+  const buyIn=1_000_000;
+  const {dir,wallets}=await inviteSetup('asleep',{fundEach:[0,0]});
+  let relayBytes=0;
+  const relay=await startRelay({tap:(seat,body)=>{relayBytes+=Buffer.byteLength(body);return [body];}});
+  const shell=async(home,...args)=>{const p=stacks(dir,home,args);await p.done;return p;};
+  let id=null;
+  const running=home=>JSON.parse(readFileSync(join(dir,home,id,'turns/process.json'),'utf8')).pid;
+  const log=home=>readFileSync(join(dir,home,id,'log.txt'),'utf8');
+  const shut=async(home,ms)=>{const pid=running(home);process.kill(pid,'SIGSTOP');try{await pause(ms);}finally{process.kill(pid,'SIGCONT');}};
+  const quiet={seconds:0,bytes:0,peak:0};
+  const measure=async()=>{const before=relayBytes;await pause(12_000);const bytes=relayBytes-before;quiet.seconds+=12;quiet.bytes+=bytes;quiet.peak=Math.max(quiet.peak,bytes/12);};
+  const started=Date.now();
+  try{
+   const hostStart=await shell('home-a','host','--relay',relay.url,'--buy-in','0.001','--big-blind','0.00002','--hands','3','--clock','300','--think','20','--fund-guest');
+   assert(hostStart.exit.code===0,`host: ${hostStart.err.slice(-400)}`);
+   const code=hostStart.out.split('\n').find(l=>l.startsWith('stacks1.'));
+   id=decodeInvite(code).id;
+   await fund(new PublicKey(wallets[0]),parseSol(/needs ([\d.]+) SOL for the match/.exec(hostStart.err)[1]));
+   const guestStart=await shell('home-b','join',code,'--yes');
+   assert(guestStart.exit.code===0,`guest: ${guestStart.err.slice(-400)}`);
+   let shutOnTurn=false,shutAfterMove=false;
+   const host=byCommands(shell,'home-a',{atDecision:async(turn,seen)=>{if(seen.decisions<=3)await measure();return true;}});
+   const guest=byCommands(shell,'home-b',{
+    atDecision:async(turn,seen)=>{
+     if(!shutOnTurn){shutOnTurn=true;await shut('home-b',30_000);return false;}
+     if(seen.decisions<=4)await measure();
+     return true;
+    },
+    afterMove:async seen=>{
+     if(shutAfterMove||seen.decisions<4)return false;
+     shutAfterMove=true;await shut('home-b',90_000);return true;
+    }});
+   const [a,b]=await withTimeout(Promise.all([host,guest]),600_000,'a match with a laptop shut twice');
+   assert(shutOnTurn&&shutAfterMove,'it was shut both times');
+   assert(a.over.finished+b.over.finished===2*buyIn,`nothing is created or lost: ${a.over.finished} and ${b.over.finished}`);
+   assert(b.missed.length>=1,'the decision that went by is reported');
+   assert(/gone quiet/.test(log('home-a')),'the other player went to the chain');
+   assert(/on-chain/.test(log('home-b')),'and the one who slept answered there');
+   const list=await direct.connection.getSignaturesForAddress(new PublicKey(a.over.match),{limit:100},'confirmed');
+   const count=list.filter(s=>!s.err).length;
+   assert(count>4,`the hand went to the chain, saw ${count} transactions`);
+   return {seconds:Math.round((Date.now()-started)/1000),hands:a.over.hands,finished:[a.over.finished,b.over.finished],decisions:[a.decisions,b.decisions],missed:b.missed.length,transactions:count,relayBytesPerHourWaiting:Math.round(quiet.bytes/quiet.seconds*3600),relayPeakBytesPerHour:Math.round(quiet.peak*3600),relayBytesTotal:relayBytes};
+  }finally{
+   if(id)for(const home of ['home-a','home-b']){try{const pid=running(home);process.kill(pid,'SIGCONT');process.kill(pid,'SIGKILL');}catch{}}
    relay.close();
   }
  },

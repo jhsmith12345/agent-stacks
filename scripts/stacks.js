@@ -1,5 +1,5 @@
 // One command each to play someone. The host gets a message to send them, and they give it to their agent.
-//   node scripts/stacks.js host --relay URL [--buy-in SOL] [--big-blind SOL] [--hands N] [--clock SECONDS] [--think SECONDS] [--fund-guest] [--decide COMMAND]
+//   node scripts/stacks.js host --relay URL [--buy-in SOL] [--big-blind SOL] [--hands N] [--clock SECONDS] [--think SECONDS] [--slow] [--fund-guest] [--decide COMMAND]
 //   node scripts/stacks.js join CODE [--yes] [--decide COMMAND]
 //   node scripts/stacks.js next [--wait SECONDS]                  What there is to decide now, when playing turn by turn
 //   node scripts/stacks.js move ID WORD [AMOUNT] [--wait SECONDS] Answers it: fold, check, call, raise TO, all-in, show or muck
@@ -7,6 +7,7 @@
 //   node scripts/stacks.js wallet                                 This player's address and balance
 // Without --decide, the match runs in the background and this command returns, and next and move make the decisions.
 // --foreground keeps it attached instead, and --check-call plays with no decisions at all, only checking and calling.
+// --slow is for agents that check in every few minutes: 15 minutes per decision, and a 4-hour clock on a disputed hand.
 // All of them also take --home DIRECTORY, --wallet FILE, --rpc URL[,URL...] and --deployment FILE.
 // The code is a bearer invitation: whoever uses it first takes the seat, so send it privately.
 import {spawn} from 'node:child_process';
@@ -26,7 +27,7 @@ import {checkDecisionProgram} from '../src/channel/decider.js';
 import {isTestNetwork,trustedDeployment} from '../src/channel/deployments.js';
 import {buildManifest,fundsNeeded,makeOffer,reserveNeeded,sendClaim,sendCreate,sendJoin,sendRetire,sendSweep,sessionHex,tryToSpend} from '../src/channel/setup.js';
 import {checkManifest,decodeInvite,encodeInvite,formatSol,matchKey,matchMailbox,newInvite,parseSol,seal,waitForManifest,waitForOffer} from '../src/channel/invite.js';
-import {finishTurns,matchRunning,moveTaken,nextTurn,recordProcess,submitMove,TurnDecider} from '../src/channel/turns.js';
+import {checkIn,finishTurns,matchRunning,moveTaken,nextTurn,recordProcess,slowMatch,submitMove,TurnDecider} from '../src/channel/turns.js';
 const option=(name,fallback=null)=>{const i=process.argv.indexOf(name);return i>0?process.argv[i+1]:fallback;};
 const flag=name=>process.argv.includes(name);
 const whole=(name,fallback)=>{const n=Number(option(name,fallback));if(!Number.isSafeInteger(n)||n<=0)throw Error(`Invalid ${name}`);return n;};
@@ -49,7 +50,7 @@ const typed=words=>`node scripts/stacks.js ${words}${option('--home')?` --home $
 // These two only talk to a match already running here. They need no wallet and no network.
 if(command==='next'||command==='move'){
  if(!existsSync(currentFile))throw Error(`No match has been started from ${home}. Start one with join or host first.`);
- const directory=join(home,readPrivate(currentFile,'utf8').trim(),'turns');
+ const match=join(home,readPrivate(currentFile,'utf8').trim()),directory=join(match,'turns'),inviteFile=join(match,'invite.txt');
  const waitSeconds=Number(option('--wait',60));
  if(!Number.isFinite(waitSeconds)||waitSeconds<0)throw Error('Invalid --wait');
  let moved=null;
@@ -59,7 +60,9 @@ if(command==='next'||command==='move'){
   moved={id,...submitMove(directory,id,words)};
   await moveTaken(directory);
  }
- const result=await nextTurn(directory,{waitMs:waitSeconds*1000,command:typed});
+ // Whatever wait they chose may be all their shell allows, so that comes first.
+ const again=option('--wait')?`next --wait ${waitSeconds}`:existsSync(inviteFile)?checkIn(decodeInvite(readPrivate(inviteFile,'utf8')).think):'next';
+ const result=await nextTurn(directory,{waitMs:waitSeconds*1000,command:typed,again});
  if(result.since?.some(event=>event.type==='missed'&&event.id===moved?.id))moved=null;
  console.log(JSON.stringify(moved?{moved,...result}:result));
  process.exit(0);
@@ -233,19 +236,21 @@ async function inBackground(invite,directory){
   if(exited)throw Error(`The match stopped straight away. See ${logFile}`);
  }
  if(invite.think<60)say(`Note: ${invite.think} seconds per decision is short for playing turn by turn, so some decisions may go by. The host sets this with --think.`);
- say(`The match is running in the background, and its log is at ${logFile}. Now run this, and keep going until it says "over":\n  ${typed('next')}`);
- console.log(JSON.stringify({started:true,next:typed('next'),log:logFile}));
+ const check=typed(checkIn(invite.think));
+ say(`The match is running in the background, and its log is at ${logFile}. Now run this, and keep going until it says "over":\n  ${check}`);
+ if(slowMatch(invite.think))say(`This is a slow match, with ${Math.floor(invite.think/60)} minutes per decision. That command waits up to 5 minutes and comes back as soon as there's a decision. Keep checking until it's over, because nothing here will wake you, and a decision nobody answers in time gets checked or folded. If your shell cuts commands off sooner, use a shorter --wait.`);
+ console.log(JSON.stringify({started:true,next:check,log:logFile}));
 }
 // Everything between the lines goes to the other player. The agent is told to check with its owner, because that's who
 // should be deciding whether to run someone else's code, and whoever sends this chooses which code that is. The code
 // comes last, with nothing after it, because an agent copying it can take a full stop for part of it.
 function challengeMessage(invite,code){
- const {repository}=JSON.parse(readFileSync(join(ROOT,'package.json'),'utf8'));
+ const {repository}=JSON.parse(readFileSync(join(ROOT,'package.json'),'utf8')),slow=slowMatch(invite.think);
  return `Send everything between the lines to the other player, privately:
 ------------------------------------------------------------------------
-Fancy a game of heads-up poker, my agent against yours? It's for test tokens on Solana devnet that have no real value, up to ${invite.hands} hands. You'll need an agent that can run shell commands. Paste this to it:
+Fancy a game of heads-up poker, my agent against yours? It's for test tokens on Solana devnet that have no real value, up to ${invite.hands} hands.${slow?` It plays slowly, so your computer has to stay awake until it's over, which could take an hour or more.`:''} You'll need an agent that can run shell commands. Paste this to it:
 
-I've been challenged to a poker match by someone I know. Read the README at ${repository.url} and tell me what it will do on this machine. If I say go ahead, play the match for me. The challenge code is ${code}
+I've been challenged to a poker match by someone I know. Read the README at ${repository.url} and tell me what it will do on this machine. If I say go ahead, play the match for me.${slow?` It's a slow match with ${Math.floor(invite.think/60)} minutes per decision, so keep checking for your turn at least every 5 minutes until it's over.`:''} The challenge code is ${code}
 
 Anyone holding that code can take your seat, so keep it to yourself.
 ------------------------------------------------------------------------`;
@@ -259,12 +264,12 @@ if(command==='wallet'){
  if(!relay)throw Error('--relay is required: the address of a relay both players can reach');
  const buyIn=parseSol(option('--buy-in','0.001'));
  const bigBlind=option('--big-blind')?parseSol(option('--big-blind')):Math.max(2,Math.floor(buyIn/100)*2);
- const think=whole('--think',20),fund=flag('--fund-guest');
+ const slow=flag('--slow'),think=whole('--think',slow?900:20),fund=flag('--fund-guest');
  const probe=new ChainClient(rpcs[0],'11111111111111111111111111111111',wallet,{allowLocal});
  const genesis=await probe.checkNetwork(),deployment=await trustedProgram(probe,genesis);
  if(fund&&!allowLocal&&!isTestNetwork(genesis))throw Error('--fund-guest only works on a test network');
  if(decide)await checkDecisionProgram(decide,{limitMs:think*1000});
- const invite=newInvite({relay,program:deployment.program,genesis,host:address,buyIn,bigBlind,hands:whole('--hands',10),seconds:whole('--clock',600),think,fund});
+ const invite=newInvite({relay,program:deployment.program,genesis,host:address,buyIn,bigBlind,hands:whole('--hands',10),seconds:whole('--clock',slow?14_400:600),think,fund});
  const {client,directory,needed,guestNeeded}=await prepare(invite,{creating:true});
  const code=encodeInvite(invite),total=needed+(fund?guestNeeded+TRANSFER_FEE:0);
  console.log(code);

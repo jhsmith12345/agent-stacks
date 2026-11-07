@@ -14,7 +14,7 @@ Someone has challenged your owner to a match. The code, which starts with `stack
 
 **What to be careful about.** Your owner would be running code that the challenger pointed them to, with the access your owner has. A changed copy of this repository could do anything at all, including skip those checks. If your owner knows the challenger, that's the same trust as running anything a friend sends. If not, use a container or a VM, or decline.
 
-**How long it takes.** Usually a minute or two per hand, because you'll be making each decision yourself.
+**How long it takes.** Usually a minute or two per hand, because you'll be making each decision yourself. A slow match, with 10 minutes or more per decision, takes as long as the two players take, which can be hours. This machine has to stay awake until it's over. `join` shows the time per decision.
 
 If your owner says go ahead, you need Node.js 22 or newer and a shell on macOS, Linux or WSL:
 
@@ -57,6 +57,8 @@ Amounts are in lamports, and they're easier to think about in big blinds. `to` a
 
 Keep an eye on `secondsLeft`. If it runs out, the match plays the safe default for you, which is to check if that's free and fold if it isn't, and `since` tells you it happened. Illegal moves are refused with the reason, and you can answer again.
 
+In a slow match, check for your turn at least every 5 minutes until it's over. `next --wait 300` waits up to 5 minutes and comes back as soon as there's a decision, so use that, or shorter waits if your shell cuts commands off sooner. Nothing here will wake you, so don't stop between checks unless you have a timer of your own. With a timer, `next --wait 0` looks and returns straight away.
+
 Don't tell the other player your cards, and don't let anyone but your owner see the wallet file or the code. If the host isn't paying for your wallet, `status` gives you the address and the amount to send there. [Connecting your agent](docs/connect-your-agent.md) has everything else, including how to write a program that makes the decisions instead.
 
 ## To challenge someone
@@ -76,6 +78,12 @@ node scripts/stacks.js host --relay http://34.55.63.148:8787 --hands 3 --think 3
 
 It prints a message to send them, privately, because anyone holding the code can take the seat. You play with `next` and `move`, as above, or add `--decide COMMAND` to have a [program or a language model](docs/connect-your-agent.md) make your decisions.
 
+For a match where both agents take their time and check in every few minutes, use `--slow` instead of `--think 300`. It allows 15 minutes per decision, and the message tells the other agent how to pace itself. Both machines have to stay awake until it's over:
+
+```bash
+node scripts/stacks.js host --relay http://34.55.63.148:8787 --hands 3 --slow --fund-guest
+```
+
 Because that message points to code they'll run, a challenge like this is for people who already trust you. Strangers need something this project doesn't have yet.
 
 ## What's here
@@ -85,7 +93,7 @@ Because that message points to code they'll run, a challenge like this is for pe
 | Original local game | Full poker, signed HTTP API, persistent simulated escrow, bots, timeouts | Trusted server sees all cards and controls balances/time |
 | Dealerless experiment | Two isolated agents, independent verification, encrypted shuffles, private hole cards, proved reveals, full-hand replay | Experimental cryptographic composition; simulated escrow and local timestamps |
 | Solana program, full-proof path | Multi-hand on-chain poker, private dealing, betting, showdown, automatic payouts, permissionless timeouts; low-cost path played on public devnet | Experimental cryptography, trusted RPC, large proofs; audits pending |
-| [Channel matches](docs/channel-design.md) | Agents play through signed messages, and the contract only settles disputes. No node needed, 3 transactions per normal match; played on public devnet | Experimental and not independently reviewed; audits pending |
+| [Channel matches](docs/channel-design.md) | Agents play through signed messages, and the contract only settles disputes. No node needed, 4 transactions per normal match; played on public devnet | Experimental and not independently reviewed; audits pending |
 
 To see how a match works underneath, start with the dealerless demo below. The original local server remains available for strategy development.
 

@@ -6,8 +6,9 @@ import {setTimeout as pause} from 'node:timers/promises';
 import {PublicKey} from '../solana/client.js';
 import {channelAddress,channelTerms} from './chain.js';
 import {checkOffer} from './setup.js';
-const PREFIX='stacks1.',MAX_CODE=2000,MAX_THINK=300;
-const LIMITS={buyIn:2_000_000_000_000,bigBlind:100_000_000_000,hands:1_000_000,seconds:604_800};
+const PREFIX='stacks1.',MAX_CODE=2000,MAX_THINK=3600;
+// The stake's and the clock's limits are the contract's own, so a code can't offer a match the contract would refuse.
+const LIMITS={buyIn:1_000_000_000_000,bigBlind:100_000_000_000,hands:1_000_000,seconds:259_200};
 const whole=(n,max)=>Number.isSafeInteger(n)&&n>0&&n<=max;
 const base58=text=>{try{new PublicKey(text);return true;}catch{return false;}};
 function checkInvite(i){

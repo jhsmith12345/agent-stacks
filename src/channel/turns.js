@@ -110,9 +110,13 @@ export async function moveTaken(directory,{waitMs=5000,pollMs=50}={}){
  return true;
 }
 const lastLine=file=>{try{return readFileSync(file,'utf8').trim().split('\n').at(-1)||null;}catch{return null;}};
+// A match where agents check in every few minutes rather than sitting over it.
+export const slowMatch=think=>think>=600;
+// How to look for your turn. A long wait never delays a decision, because next comes back as soon as there is one.
+export const checkIn=think=>slowMatch(think)?'next --wait 300':'next';
 // What an agent should do now: a decision to make, or word that the match is over, stopped, or nothing's due yet.
 // This only ever waits for so long, because the shell it's running in may not let a command run for long.
-export async function nextTurn(directory,{waitMs=60_000,pollMs=250,command=words=>words}={}){
+export async function nextTurn(directory,{waitMs=60_000,pollMs=250,command=words=>words,again='next'}={}){
  const log=join(dirname(directory),'log.txt'),started=Date.now();
  // Hands that ended and decisions that went by since the last time anyone asked.
  const reporting=result=>{
@@ -130,7 +134,7 @@ export async function nextTurn(directory,{waitMs=60_000,pollMs=250,command=words
    const {deadline,...asked}=question,secondsLeft=Math.floor((deadline-Date.now())/1000);
    if(secondsLeft>0)return reporting({...asked,secondsLeft,moves:movesFor(question,command),...(asked.legal?.raise?{raiseTo:`TO is your total on this street in lamports, from ${asked.legal.raise.min} to ${asked.legal.raise.max}`}:{})});
   }
-  if(Date.now()-started>=waitMs)return reporting({type:'waiting',status:lastLine(log),note:`Nothing for you to decide yet. Run this again: ${command('next')}`});
+  if(Date.now()-started>=waitMs)return reporting({type:'waiting',status:lastLine(log),note:`Nothing for you to decide yet. Run this again: ${command(again)}`});
   await pause(pollMs);
  }
 }

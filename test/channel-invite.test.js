@@ -62,9 +62,12 @@ test('the relay’s name for an invite doesn’t give away its secret',()=>{
 test('a code that’s damaged or makes no sense is refused',()=>{
  const good=JSON.parse(Buffer.from(encodeInvite(newInvite(terms())).slice(8),'base64url').toString());
  for(const bad of ['','hello','stacks1.','stacks1.!!!','stacks1.e30',`stacks1.${'A'.repeat(3000)}`,encodeRaw(null),encodeRaw([]),encodeRaw('x')])assert.throws(()=>decodeInvite(bad),/invite/i,bad.slice(0,20));
- const cases={relay:['ftp://relay.example','not a url',null,7],program:['nope',null],genesis:['nope',null],host:['0OIl',null],secret:['short','zz'.repeat(32),null],buyIn:[0,-1,1.5,'5',2**60,null],bigBlind:[0,3,1.5,2_000_000,null],hands:[0,-1,1.5,null],seconds:[0,-1,1.5,10_000_000,null],think:[0,-1,1000,null,1.5],fund:[false,null,1,'yes']};
+ const cases={relay:['ftp://relay.example','not a url',null,7],program:['nope',null],genesis:['nope',null],host:['0OIl',null],secret:['short','zz'.repeat(32),null],buyIn:[0,-1,1.5,'5',2**60,1_000_000_000_001,null],bigBlind:[0,3,1.5,2_000_000,null],hands:[0,-1,1.5,null],seconds:[0,-1,1.5,259_201,null],think:[0,-1,3601,null,1.5],fund:[false,null,1,'yes']};
  for(const [field,values] of Object.entries(cases))for(const value of values)assert.throws(()=>decodeInvite(encodeRaw({...good,[field]:value})),/invite/i,`${field}=${value}`);
  assert.throws(()=>decodeInvite(encodeRaw({...good,seconds:30,think:20})),/thinking time/,'a decision has to fit the clock');
+ assert.equal(decodeInvite(encodeRaw({...good,seconds:259_200,think:3600})).think,3600,'it can take up to an hour, on the longest clock the contract allows');
+ assert.throws(()=>decodeInvite(encodeRaw({...good,seconds:259_200,think:3601})),/thinking time/,'but no longer, however long the clock');
+ assert.equal(decodeInvite(encodeRaw({...good,buyIn:1_000_000_000_000})).buyIn,1_000_000_000_000,'and the largest stake the contract allows is fine');
  assert.throws(()=>newInvite(terms({bigBlind:200_002})),/blinds/);
 });
 

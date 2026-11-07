@@ -67,7 +67,37 @@ What it found:
 - **Sonnet copied the full stop after the code as part of the code.** It only worked because the decoder skips stray characters. The message now ends with the code, and a test holds the decoder to that.
 - **Haiku took a hand's `stacks` for that hand's result**, and told its owner the record looked inconsistent, though the numbers were right. The README now says they're running totals.
 
-This doesn't cover a real friend's machine or a different vendor's agent, a shell that kills background processes, or a host playing turn by turn on public devnet, which has only run locally. Both models here answer quickly, so a slower agent would take longer.
+This doesn't cover a real friend's machine or a different vendor's agent, or a shell that kills background processes. Both models here answer quickly, so a slower agent would take longer.
+
+### Fresh agents on both seats of a slow match, 2026-11-06
+
+This tests `--slow`, where both agents check in every few minutes. Each seat had a new Claude Code agent with only a shell, as a new user on its own clean Linux VM, on public devnet and the public relay. The host's agent was asked to host a slow match of 3 hands and then play, checking at least every 5 minutes. The guest's got only the paragraph the host's command printed, then "Go ahead". Partway through, the guest's match process was paused for 10 minutes, to stand in for a machine going to sleep. This code wasn't public yet, so `git clone` answered from a local copy, and the guest read the older README from the web.
+
+| | Host: Claude Sonnet 5.5 | Guest: Claude Haiku 5.5 |
+| --- | --- | --- |
+| Time allowed per shell command | 10 minutes | 2 minutes |
+| Finished with, from 0.001 SOL | 0.00118 SOL | 0.00082 SOL |
+| Commands in the match | 16 | 22 |
+| Decisions missed | 0 | 0 |
+| Illegal moves | 0 | 0 |
+| Commands cut off by the shell | 0 | 1 |
+| Model cost, as the command reports it | $0.22 | $0.02 |
+
+All 3 hands took 13 minutes 40 seconds from "go", 10 minutes of which was the pause. The chain shows 4 transactions. Neither agent stopped between checks or needed a nudge, and both kept checking through the pause. Public devnet refused 10 requests for going too fast, and the software retried them without any effect on the match.
+
+What it found:
+
+- **`next --wait 300` ran into the guest's 2-minute limit.** Haiku worked out why and used `--wait 100` from then on. Nothing was lost, which is why `next` repeats whatever wait it was given.
+- **Haiku decoded the code itself before joining,** and took the clock for the length of the whole match. It corrected this once `join` printed the terms.
+
+Waiting for a decision doesn't slow anything down, so play takes only as long as the agents think. These two took under 4 minutes of play, far short of the 15 minutes they were allowed per decision. No decision came close to that limit, and neither agent stopped and woke itself on a timer, so neither of those has been tried with a real agent.
+
+The `slowmatch` and `asleep` scenarios in `scripts/channel-rehearsal.js` cover the rest on a local validator. `slowmatch` plays a hand from the host's flag on, and checks the instructions both players get. `asleep` shuts one player's match process twice, with 20 seconds per decision, so the other player goes to the chain after 60 seconds of silence:
+
+- **Shut for 30 seconds on its own turn:** the decision goes by, it's reported on waking, and the hand carries on.
+- **Shut for 90 seconds after moving:** the other player takes the hand to the chain, the sleeper answers there on waking, and the match settles at 980,000 and 1,020,000 lamports, with 11 transactions and nobody losing on the clock.
+
+Players waiting on each other send about 1.9 MB an hour through the relay, per match, and 2.5 MB at most, because each resends its latest message every 5 seconds. That doesn't count the replies to their polling. The relay's limit is 5 GB a day.
 
 ### One wallet hosting several matches, 2026-11-06
 
@@ -182,7 +212,7 @@ The older path needed 57 minutes and about 2,900 transactions for 2 hands in its
 ### Automated checks
 
 - **Engine against contract:** 600 random betting games and 3,000 hand rankings match byte for byte, including illegal moves. A whole hand with real keys, shuffles and proofs matches at every step in the SBF VM.
-- **Tests:** 37 for the contract in the VM, also run against the channel-only build. 52 for the agent and its dispute decisions, 41 for connecting a decision program, 14 for the invite, 17 for playing turn by turn, 20 for the language-model program, 19 for the relay's limits and sealing, 12 for the referee, 9 for the solver, and 2 for the fairness of the deal.
+- **Tests:** 37 for the contract in the VM, also run against the channel-only build. 52 for the agent and its dispute decisions, 41 for connecting a decision program, 14 for the invite, 18 for playing turn by turn, 20 for the language-model program, 19 for the relay's limits and sealing, 12 for the referee, 9 for the solver, and 2 for the fairness of the deal.
 - **Fair deal:** across 52,000 shuffles every card is equally likely in every position, and across 30,000 deals dealt the way a match deals them neither seat wins more often and ties come up at about the real hold'em rate. Both run on every test pass, with limits six standard deviations out. This checks the shuffle and hand ranking, not the mental-poker encryption around them.
 - **Compute:** at most 97,988 units for a share move and 7,069 for a betting move.
 
@@ -196,6 +226,7 @@ Mutation checks break one rule at a time in a scratch copy and confirm a test fa
 | Relay limits and sealing | 39 of 39 | The first run caught 37: nothing checked that dropped messages left the memory total, or that nonces never repeat. Both have tests now |
 | Reading payouts from history, and the confirmation wait | 15 of 15 | The first run on payouts caught 4 of 7: its running total hid two faults, so the code got simpler and the test stricter |
 | Playing turn by turn, the check on decision programs, and funding the guest | 48 of 48 | The first runs missed six. Three were in restarts and in decisions with no time left, which have tests now. One was the amount a host is told to hold: the rehearsal gave it a little extra, so now it funds exactly that figure. Two were a shared wallet running short between its check and its transaction, which a rehearsal can't reach reliably, so that logic moved somewhere a test can |
+| Slow matches: the limits on an invite, when a match counts as slow, and what `next` says to run | 11 of 11 | |
 | The language-model program | 29 of 30 | Dropping the filter for text blocks: a thinking block has no text, so it changes nothing |
 | Decision programs and invites | 72 of 74 | An answer meant for an earlier question: the check that asks the question also stops it. Offering a raise after already acting: heads-up play can't reach that state, because the only raise that doesn't reopen the betting is an all-in, which leaves nobody to raise against |
 

@@ -8,7 +8,7 @@ import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {setTimeout as pause} from 'node:timers/promises';
 import {writePrivate} from '../src/private-files.js';
-import {finishTurns,matchRunning,moveTaken,nextTurn,readMove,recordProcess,submitMove,TurnDecider} from '../src/channel/turns.js';
+import {checkIn,finishTurns,matchRunning,moveTaken,nextTurn,readMove,recordProcess,slowMatch,submitMove,TurnDecider} from '../src/channel/turns.js';
 const SCRIPT=fileURLToPath(new URL('../scripts/stacks.js',import.meta.url));
 const legal={fold:true,check:false,call:20_000,raise:{min:40_000,max:960_000},allIn:960_000};
 const view={seat:0,hand:2,hands:3,street:1,button:0,cards:[0,1],board:[2,3,4],stacks:[960_000,940_000],bets:[0,20_000],pot:100_000,owed:20_000,bigBlind:20_000,legal,history:[]};
@@ -185,7 +185,16 @@ test('next gives up after a while, so a shell’s time limit never decides anyth
  const started=Date.now();
  const turn=await nextTurn(directory,{waitMs:120,pollMs:5,command:words=>`stacks ${words}`});
  assert.ok(Date.now()-started>=120);
- assert.equal(turn.type,'waiting');assert.equal(turn.status,'Waiting for the other player.');assert.match(turn.note,/stacks next/);
+ assert.equal(turn.type,'waiting');assert.equal(turn.status,'Waiting for the other player.');assert.match(turn.note,/stacks next$/);
+});
+
+test('it says how to check again, at the match’s own pace',async t=>{
+ const {directory}=folder(t);
+ const turn=await nextTurn(directory,{waitMs:0,pollMs:5,command:words=>`stacks ${words}`,again:checkIn(900)});
+ assert.equal(turn.type,'waiting');assert.match(turn.note,/stacks next --wait 300$/);
+ assert.equal(checkIn(599),'next','a match with only minutes per decision is watched closely');
+ assert.equal(checkIn(600),'next --wait 300');
+ assert.equal(slowMatch(599),false);assert.equal(slowMatch(600),true);
 });
 
 test('the end of the match is reported, however the commands were left',async t=>{
@@ -230,6 +239,7 @@ test('the commands need no wallet and no network, and say what’s wrong',t=>{
  writePrivate(join(home,'current'),'match');
  done=run('next','--wait','0');
  assert.equal(done.status,0);assert.equal(JSON.parse(done.stdout).type,'waiting');
+ assert.match(JSON.parse(done.stdout).note,/next --wait 0 --home/,'it keeps to the wait they chose, which may be all their shell allows');
  done=run('next','--wait','never');
  assert.equal(done.status,1);assert.match(done.stderr,/Invalid --wait/);
  done=run('move');

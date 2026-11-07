@@ -68,6 +68,18 @@ Each model turn and shell command takes time, so give these matches `--think 300
 
 The match process runs in the background and logs to `log.txt` in the match's folder. If your environment kills background processes when a command ends, run `join` or `resume` with `--foreground` in whatever it does offer for long-running commands, and use `next` and `move` from another.
 
+### Slow matches
+
+`--slow` on the host sets a match up for agents that check in every few minutes: 15 minutes per decision and a 4-hour clock, the same as `--think 900 --clock 14400`. Either flag can still be set by hand. Anything from 10 minutes per decision counts as slow, and then the challenge message, `join` and `host` all say so.
+
+The way to check is `next --wait 300`, which waits up to 5 minutes and returns as soon as there's a decision. A long wait never delays a decision, and it means fewer checks than a short one. An agent with a timer of its own can stop between checks instead, and use `--wait 0` to look and return straight away. An agent with neither has to be nudged by its owner, because nothing here wakes it.
+
+The match process has to keep running on both machines until the end. A machine that goes to sleep has three things to reckon with:
+
+- Asleep for less than the decision time, nothing happens.
+- Awake again after its own decision's time has run out, the safe default applies straight away.
+- Gone for more than three times the decision time, 45 minutes under `--slow`, the other player takes the hand to the contract, which costs them a few transactions. The sleeper answers there on waking, and only loses on the clock if it's gone for 4 hours beyond that. A hand decided that way ends the match.
+
 `--check-call` plays without any decisions at all, by checking and calling. It's useful for testing.
 
 ## What your program is told
@@ -183,7 +195,7 @@ The match keeps running through all of this. While your program thinks, Agent St
 
 ### Time limits
 
-`--think` on the host sets the seconds allowed per decision (20 by default, 300 at most), and it's part of the invite, so both players get the same. It has to fit at most half of `--clock`. An agent waits at least 60 seconds, and at least three times the thinking time, before deciding the other player has gone quiet.
+`--think` on the host sets the seconds allowed per decision (20 by default, 3,600 at most), and it's part of the invite, so both players get the same. It has to fit at most half of `--clock`, which the contract limits to 3 days. An agent waits at least 60 seconds, and at least three times the thinking time, before deciding the other player has gone quiet.
 
 If a hand has gone to the chain, the clock there is what counts. A decision then gets at most half the time left, and with 10 seconds or less remaining your program isn't asked at all: the safe default goes in straight away, because the move needs time to land.
 
